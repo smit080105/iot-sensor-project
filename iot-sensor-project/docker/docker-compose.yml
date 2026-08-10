@@ -1,0 +1,78 @@
+version: "3.8"
+
+# This file lives in docker/, so build contexts and volume paths use "../"
+# Values below come from docker/.env (Compose loads it automatically
+# because it sits next to this file).
+#
+# NOTE: devices are registered by uploading devices.csv (the CSV IS the
+# registry). The MQTT handshake with the second party (her device/script)
+# on DEVICE_reg/DEVICE_regok just looks a MAC up in that CSV-backed table
+# and echoes it back — see backend/src/mqtt.js and mqtt/PUBLIC_BROKER.md
+# for the full flow.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../database:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - iot-net
+
+  backend:
+    build: ../backend
+    container_name: backend
+    environment:
+      PORT: ${BACKEND_PORT}
+      PGHOST: ${PGHOST}
+      PGPORT: ${PGPORT}
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+
+      # Public MQTT broker both you and her connect to. Must be the exact
+      # same broker on both sides, or you'll never see each other's messages.
+      MQTT_URL: ${MQTT_URL}
+
+      # Shared secret her device includes in DEVICE_reg. Must match
+      # exactly what she publishes, or registration requests get rejected.
+      PAIRING_TOKEN: ${PAIRING_TOKEN}
+    ports:
+      - "4000:4000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - iot-net
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE}
+    container_name: frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - iot-net
+
+networks:
+  iot-net:
+    driver: bridge
+
+volumes:
+  pgdata:
