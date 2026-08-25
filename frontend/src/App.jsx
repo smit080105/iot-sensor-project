@@ -488,7 +488,7 @@ export default function App() {
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
                   <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
                   <line x1="7" y1="2" x2="7" y2="22" />
-                </line>
+                </svg>
                 <p>Select a device from the sidebar to display real-time sensor metrics and analysis trend lines.</p>
               </div>
             )}
