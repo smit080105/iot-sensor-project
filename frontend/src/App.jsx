@@ -2,11 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import TelemetryChart, { HIGH_TEMP_THRESHOLD } from "./TelemetryChart";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
-// Same host/port as the HTTP API — the backend attaches the WebSocket
-// server to the SAME server (see backend/src/index.js + ws.js), just
-// swap the protocol from http(s) to ws(s).
 const WS_BASE = API_BASE.replace(/^http/, "ws");
-
 const HISTORY_CAP = 200; // max points kept per chart series
 
 function useInterval(callback, delayMs) {
@@ -34,9 +30,6 @@ export default function App() {
   const [connErr, setConnErr] = useState(null);
   const [wsStatus, setWsStatus] = useState("connecting"); // connecting | connected | disconnected
 
-  // Chart history — separate running series per sensor type so the
-  // Temperature/Humidity/Correlation views have real trend data to plot,
-  // independent of the small 25-row "raw feed" table.
   const [tempHistory, setTempHistory] = useState([]);
   const [humHistory, setHumHistory] = useState([]);
 
@@ -44,6 +37,8 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [uploadErr, setUploadErr] = useState(null);
+
+  const fileInputRef = useRef(null);
 
   const loadDevices = useCallback(() => {
     fetch(`${API_BASE}/api/devices`)
@@ -60,7 +55,7 @@ export default function App() {
   }, [loadDevices]);
 
   async function uploadCsv(e) {
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (!csvFile) return;
 
     setUploading(true);
@@ -81,7 +76,9 @@ export default function App() {
         setUploadErr(data.error || `Upload failed (${res.status})`);
       } else {
         setUploadResult(data);
-        loadDevices(); // refresh the dashboard with the new device set
+        setCsvFile(null); // clear after successful upload
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        loadDevices();
       }
     } catch (err) {
       setUploadErr(err.message);
@@ -90,10 +87,6 @@ export default function App() {
     }
   }
 
-  // Merge a batch of freshly-received readings into the "latest per
-  // sensor" list, keyed by sensor_id + sensor_type so accelerometer /
-  // gyroscope axes (accel_x, gyro_z, etc.) each get their own card
-  // instead of overwriting temperature/humidity.
   function mergeLatest(prev, rows) {
     const copy = [...prev];
     for (const r of rows) {
@@ -113,10 +106,6 @@ export default function App() {
   }
 
   // --- WebSocket: live push updates ---------------------------------
-  // The backend broadcasts { type: "raw-feed", data: [...] } the instant
-  // new telemetry is stored, and { type: "reg-log", data: {...} } the
-  // instant a DEVICE_reg attempt is logged. This is what makes the UI
-  // update instantly instead of waiting for the next poll.
   const wsRef = useRef(null);
   useEffect(() => {
     let reconnectTimer;
@@ -127,7 +116,6 @@ export default function App() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log("[ws] connected to backend");
         setWsStatus("connected");
         setConnErr(null);
       };
@@ -153,7 +141,6 @@ export default function App() {
 
       ws.onclose = () => {
         if (cancelled) return;
-        console.log("[ws] disconnected — retrying in 3s");
         setWsStatus("disconnected");
         reconnectTimer = setTimeout(connect, 3000);
       };
@@ -169,15 +156,13 @@ export default function App() {
       cancelled = true;
       clearTimeout(reconnectTimer);
       if (wsRef.current) {
-        wsRef.current.onclose = null; // don't trigger a reconnect on unmount
+        wsRef.current.onclose = null;
         wsRef.current.close();
       }
     };
   }, []);
 
   // --- HTTP polling: fallback / initial load -------------------------
-  // Runs every 10s as a safety net in case the WebSocket connection is
-  // down, and to seed/refresh the chart history and tables on first load.
   const pollSensors = useCallback(() => {
     Promise.all([
       fetch(`${API_BASE}/api/sensors/latest`).then((r) => r.json()),
@@ -189,7 +174,7 @@ export default function App() {
         setLatest(Array.isArray(latestRows) ? latestRows : []);
         setFeed(Array.isArray(feedRows) ? feedRows : []);
 
-        const hist = Array.isArray(historyRows) ? [...historyRows].reverse() : []; // API is DESC, chart wants ascending
+        const hist = Array.isArray(historyRows) ? [...historyRows].reverse() : [];
         setTempHistory(hist.filter((r) => r.sensor_type === "temperature").slice(-HISTORY_CAP));
         setHumHistory(hist.filter((r) => r.sensor_type === "humidity").slice(-HISTORY_CAP));
 
@@ -202,167 +187,379 @@ export default function App() {
   useInterval(pollSensors, 10000);
 
   const linkDown = connErr || wsStatus === "disconnected";
-
-  // High-temperature alert: fires whenever ANY currently-latest
-  // temperature reading exceeds the 28°C threshold shown on the chart.
   const hotSensors = latest.filter((s) => s.sensor_type === "temperature" && Number(s.value) > HIGH_TEMP_THRESHOLD);
+
+  // Statistics Calculations
+  const activeNodesCount = new Set(latest.map((s) => s.sensor_id)).size;
+  
+  const tempReadings = latest.filter((s) => s.sensor_type === "temperature");
+  const avgTemp = tempReadings.length
+    ? (tempReadings.reduce((sum, s) => sum + Number(s.value), 0) / tempReadings.length).toFixed(1)
+    : "N/A";
+
+  const humReadings = latest.filter((s) => s.sensor_type === "humidity");
+  const avgHum = humReadings.length
+    ? (humReadings.reduce((sum, s) => sum + Number(s.value), 0) / humReadings.length).toFixed(1)
+    : "N/A";
 
   return (
     <div className="console">
+      {/* Top Navbar */}
       <header className="topbar">
-        <div className="brand">MAC-AUTHORIZED SENSOR CONSOLE</div>
-        <div className={`status ${linkDown ? "status--down" : "status--up"}`}>
-          {linkDown ? "LINK DOWN" : `LINK OK (ws: ${wsStatus})`}
+        <div className="brand-wrapper">
+          <svg className="brand-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
+            <line x1="6" y1="6" x2="6.01" y2="6" />
+            <line x1="6" y1="18" x2="6.01" y2="18" />
+          </svg>
+          <div className="brand">AERO<span>METRY</span> GATEWAY</div>
+        </div>
+        <div className={`status-badge ${linkDown ? "status--down" : "status--up"}`}>
+          <span style={{
+            width: "8px",
+            height: "8px",
+            borderRadius: "50%",
+            backgroundColor: linkDown ? "#ef4444" : "#10b981",
+            display: "inline-block",
+            marginRight: "6px"
+          }} />
+          {linkDown ? "Disconnected" : `Live (${wsStatus})`}
         </div>
       </header>
 
+      {/* Alert Banner */}
       {hotSensors.length > 0 && (
         <div className="alert-banner">
-          ⚠ HIGH TEMPERATURE — {hotSensors.length} sensor{hotSensors.length > 1 ? "s" : ""} above {HIGH_TEMP_THRESHOLD}°C:{" "}
-          {hotSensors.map((s) => `${s.sensor_id} (${s.value}°C)`).join(", ")}
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <div className="alert-banner-content">
+            <strong>Critical Alert:</strong> Temperature threshold exceeded ({HIGH_TEMP_THRESHOLD}°C) on {hotSensors.length} active node{hotSensors.length > 1 ? "s" : ""}:{" "}
+            {hotSensors.map((s) => `${s.sensor_id} (${s.value}°C)`).join(", ")}
+          </div>
         </div>
       )}
 
-      <section className="panel">
-        <h2>DEVICE_reg ATTEMPTS <span className="dim">// live log of every incoming registration message — see the raw mac_address/token here</span></h2>
-        <table>
-          <thead>
-            <tr>
-              <th>TIME</th>
-              <th>MAC ADDRESS</th>
-              <th>TOKEN</th>
-              <th>RESULT</th>
-            </tr>
-          </thead>
-          <tbody>
-            {regLog.map((r, i) => (
-              <tr key={i}>
-                <td>{new Date(r.time).toLocaleTimeString()}</td>
-                <td>{r.mac || <span className="dim">—</span>}</td>
-                <td>{r.token || <span className="dim">—</span>}</td>
-                <td className={r.result?.startsWith("ok") ? "ok" : "err"}>{r.result}</td>
-              </tr>
-            ))}
-            {regLog.length === 0 && (
-              <tr><td colSpan={4} className="dim">no DEVICE_reg messages received yet</td></tr>
-            )}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="panel">
-        <h2>UPLOAD DEVICES CSV <span className="dim">// this CSV is the registry — rows need mac_address and dongle_id</span></h2>
-        <form onSubmit={uploadCsv} className="mac-form">
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
-          />
-          <button type="submit" disabled={!csvFile || uploading}>
-            {uploading ? "Uploading…" : "Upload & Sync"}
-          </button>
-        </form>
-        {uploadErr && <p className="err">{uploadErr}</p>}
-        {uploadResult && (
-          <p className="ok">
-            Added: {uploadResult.added.length} &middot; Removed: {uploadResult.removed.length}
-            {uploadResult.rejected.length > 0 && (
-              <> &middot; Rejected (missing mac/dongle_id): {uploadResult.rejected.length}</>
-            )}
-            {" "}&middot; Now registered: {uploadResult.total_registered}
-          </p>
-        )}
-      </section>
-
-      <section className="panel">
-        <h2>REGISTERED DEVICES <span className="dim">// {devices.length} registered from the last uploaded CSV</span></h2>
-        {devicesErr && <p className="err">Could not load device registry: {devicesErr}</p>}
-        <table>
-          <thead>
-            <tr>
-              <th>MAC ADDRESS</th>
-              <th>SERIAL NUMBER</th>
-              <th>PRODUCT TYPE</th>
-              <th>DONGLE ID</th>
-            </tr>
-          </thead>
-          <tbody>
-            {devices.map((d, i) => (
-              <tr key={i}>
-                <td>{d.mac_address}</td>
-                <td>{d.serial_number}</td>
-                <td>{d.product_type}</td>
-                <td>{d.dongle_id}</td>
-              </tr>
-            ))}
-            {devices.length === 0 && !devicesErr && (
-              <tr><td colSpan={4} className="dim">no devices registered — upload a CSV with mac_address and dongle_id above</td></tr>
-            )}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="panel">
-        <h2>TEMPERATURE & HUMIDITY TRENDS <span className="dim">// switch view below — red dashed line marks the {HIGH_TEMP_THRESHOLD}°C high limit</span></h2>
-        <TelemetryChart temperature={tempHistory} humidity={humHistory} />
-      </section>
-
-      <section className="panel">
-        <h2>LIVE SENSORS <span className="dim">// temperature, humidity, accelerometer (Ax/Ay/Az) and gyroscope (Gx/Gy/Gz) — every reading stays here, not just the newest one</span></h2>
-        <div className="cards">
-          {latest
-            .slice()
-            .sort((a, b) => a.sensor_type.localeCompare(b.sensor_type))
-            .map((s) => (
-              <div
-                className={`card ${s.sensor_type === "temperature" && Number(s.value) > HIGH_TEMP_THRESHOLD ? "card--hot" : ""}`}
-                key={`${s.sensor_id}::${s.sensor_type}`}
-              >
-                <div className="card-id">{s.sensor_id}</div>
-                <div className="card-mac">{s.mac_address}</div>
-                <div className="card-value">
-                  {s.value}
-                  <span className="unit">{s.unit}</span>
-                </div>
-                <div className="card-meta">
-                  {s.sensor_type} &middot; {timeAgo(s.received_at)}
-                </div>
-              </div>
-            ))}
-          {latest.length === 0 && (
-            <p className="dim">no readings yet — upload a CSV to register devices, then wait for telemetry</p>
-          )}
+      {/* KPI Stats Row */}
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-icon-wrapper">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+              <line x1="7" y1="2" x2="7" y2="22" />
+              <line x1="17" y1="2" x2="17" y2="22" />
+              <line x1="2" y1="12" x2="22" y2="12" />
+            </svg>
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Registered Devices</span>
+            <span className="stat-value">{devices.length}</span>
+          </div>
         </div>
-      </section>
 
-      <section className="panel">
-        <h2>RAW FEED <span className="dim">// last 25 readings, updated live over WebSocket</span></h2>
-        <table>
-          <thead>
-            <tr>
-              <th>TIME</th>
-              <th>MAC ADDRESS</th>
-              <th>SENSOR ID</th>
-              <th>TYPE</th>
-              <th>VALUE</th>
-            </tr>
-          </thead>
-          <tbody>
-            {feed.map((r, i) => (
-              <tr key={r.id ?? `${r.sensor_id}-${r.sensor_type}-${r.received_at}-${i}`}>
-                <td>{new Date(r.received_at).toLocaleTimeString()}</td>
-                <td>{r.mac_address}</td>
-                <td>{r.sensor_id}</td>
-                <td>{r.sensor_type}</td>
-                <td>{r.value}{r.unit}</td>
-              </tr>
-            ))}
-            {feed.length === 0 && (
-              <tr><td colSpan={5} className="dim">no data</td></tr>
+        <div className="stat-card">
+          <div className="stat-icon-wrapper success">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+            </svg>
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Active Sensors</span>
+            <span className="stat-value">{activeNodesCount}</span>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon-wrapper warning">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Avg Temperature</span>
+            <span className="stat-value">{avgTemp !== "N/A" ? `${avgTemp}°C` : "N/A"}</span>
+          </div>
+        </div>
+
+        <div className="stat-card">
+          <div className="stat-icon-wrapper danger">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+            </svg>
+          </div>
+          <div className="stat-info">
+            <span className="stat-label">Avg Humidity</span>
+            <span className="stat-value">{avgHum !== "N/A" ? `${avgHum}%` : "N/A"}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Grid */}
+      <div className="dashboard-grid">
+        {/* Left Column: Chart and Live telemetry cards */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          {/* Telemetry Charts Panel */}
+          <section className="panel">
+            <TelemetryChart temperature={tempHistory} humidity={humHistory} />
+          </section>
+
+          {/* Live Sensors Grid */}
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+                    <rect x="2" y="2" width="20" height="20" rx="2" ry="2" />
+                    <path d="M12 18h.01" />
+                    <path d="M17 12h.01" />
+                    <path d="M7 12h.01" />
+                    <path d="M12 6h.01" />
+                  </svg>
+                  Active Sensor Readings
+                </h2>
+                <p className="panel-subtitle">Real-time status and metric payloads broadcasted by connected nodes</p>
+              </div>
+            </div>
+            
+            <div className="cards">
+              {latest
+                .slice()
+                .sort((a, b) => a.sensor_type.localeCompare(b.sensor_type))
+                .map((s) => {
+                  const isHot = s.sensor_type === "temperature" && Number(s.value) > HIGH_TEMP_THRESHOLD;
+                  return (
+                    <div
+                      className={`card ${isHot ? "card--hot" : ""}`}
+                      key={`${s.sensor_id}::${s.sensor_type}`}
+                    >
+                      <div className="card-id">{s.sensor_id}</div>
+                      <div className="card-mac">{s.mac_address}</div>
+                      <div className="card-value">
+                        {s.value}
+                        <span className="unit">{s.unit}</span>
+                      </div>
+                      <div className="card-meta">
+                        {s.sensor_type} &middot; {timeAgo(s.received_at)}
+                      </div>
+                    </div>
+                  );
+                })}
+              {latest.length === 0 && (
+                <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "2rem 0" }} className="dim">
+                  Awaiting sensor connections. Sync the CSV registry to allow authorized nodes.
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+
+        {/* Right Column: Upload, Registration Logs, Registered List, Raw Feed */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+          {/* CSV File Upload Registry */}
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                    <polyline points="17 8 12 3 7 8" />
+                    <line x1="12" y1="3" x2="12" y2="15" />
+                  </svg>
+                  Sync Device Registry
+                </h2>
+                <p className="panel-subtitle">Upload authorized node configuration profiles (CSV format)</p>
+              </div>
+            </div>
+
+            <div 
+              className="upload-zone" 
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <svg className="upload-icon" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="12" y1="18" x2="12" y2="12" />
+                <line x1="9" y1="15" x2="15" y2="15" />
+              </svg>
+              <div className="upload-text">
+                <strong>Click to choose file</strong> or drag & drop authorized device registry list
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                className="file-input-hidden"
+                onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
+              />
+              
+              {csvFile && (
+                <div className="selected-file-banner" onClick={(e) => e.stopPropagation()}>
+                  <div className="file-details">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                    </svg>
+                    <span>{csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)</span>
+                  </div>
+                  <button className="file-remove-btn" onClick={() => setCsvFile(null)}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {csvFile && (
+              <button 
+                type="button" 
+                onClick={uploadCsv} 
+                className="upload-action-btn"
+                disabled={uploading}
+              >
+                {uploading ? "Synchronizing..." : "Upload & Apply Registry"}
+              </button>
             )}
-          </tbody>
-        </table>
-      </section>
+
+            {uploadErr && <div className="err" style={{ fontSize: "0.8rem", fontWeight: "500" }}>{uploadErr}</div>}
+            {uploadResult && (
+              <div className="ok" style={{ fontSize: "0.8rem", fontWeight: "500" }}>
+                Success: Sync complete ({uploadResult.added.length} added, {uploadResult.removed.length} removed, {uploadResult.total_registered} total registered nodes).
+              </div>
+            )}
+          </section>
+
+          {/* Registration Attempt Logs */}
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+                    <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                  </svg>
+                  Network Access Attempts
+                </h2>
+                <p className="panel-subtitle">Audited authentication logs for sensor handshake handshakes</p>
+              </div>
+            </div>
+
+            <div className="table-container" style={{ maxHeight: "200px" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>MAC Address</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {regLog.map((r, i) => (
+                    <tr key={i}>
+                      <td style={{ whiteSpace: "nowrap" }}>{new Date(r.time).toLocaleTimeString()}</td>
+                      <td style={{ fontFamily: "monospace" }}>{r.mac || <span className="dim">—</span>}</td>
+                      <td className={r.result?.startsWith("ok") ? "ok" : "err"} style={{ fontWeight: "600" }}>{r.result}</td>
+                    </tr>
+                  ))}
+                  {regLog.length === 0 && (
+                    <tr>
+                      <td colSpan={3} style={{ textAlign: "center" }} className="dim">No authentication attempts recorded.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* Registered Devices Registry */}
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  Authorized Registry List
+                </h2>
+                <p className="panel-subtitle">Verified hardware profiles allowed on this gateway</p>
+              </div>
+            </div>
+
+            {devicesErr && <div className="err" style={{ fontSize: "0.8rem" }}>Failed to fetch active registry: {devicesErr}</div>}
+            
+            <div className="table-container" style={{ maxHeight: "200px" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>MAC Address</th>
+                    <th>Serial Number</th>
+                    <th>Product Type</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {devices.map((d, i) => (
+                    <tr key={i}>
+                      <td style={{ fontFamily: "monospace" }}>{d.mac_address}</td>
+                      <td>{d.serial_number}</td>
+                      <td>{d.product_type}</td>
+                    </tr>
+                  ))}
+                  {devices.length === 0 && !devicesErr && (
+                    <tr>
+                      <td colSpan={3} style={{ textAlign: "center" }} className="dim">Registry empty. Upload configuration profile.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* Raw Feed WebSocket Logs */}
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title-group">
+                <h2>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
+                    <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
+                  </svg>
+                  Live Signal Streams
+                </h2>
+                <p className="panel-subtitle">Incoming stream payloads received over active WebSockets</p>
+              </div>
+            </div>
+
+            <div className="table-container" style={{ maxHeight: "250px" }}>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Timestamp</th>
+                    <th>Sensor</th>
+                    <th>Type</th>
+                    <th>Val</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {feed.map((r, i) => (
+                    <tr key={r.id ?? `${r.sensor_id}-${r.sensor_type}-${r.received_at}-${i}`}>
+                      <td>{new Date(r.received_at).toLocaleTimeString()}</td>
+                      <td>{r.sensor_id}</td>
+                      <td style={{ textTransform: "capitalize" }}>{r.sensor_type}</td>
+                      <td style={{ fontWeight: "600" }}>{r.value}{r.unit}</td>
+                    </tr>
+                  ))}
+                  {feed.length === 0 && (
+                    <tr>
+                      <td colSpan={4} style={{ textAlign: "center" }} className="dim">No telemetry stream connected.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }
