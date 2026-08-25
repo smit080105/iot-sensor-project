@@ -195,7 +195,17 @@ async function handleDeviceReg(client, payload, raw) {
 // row, ALWAYS publish an ACK back so her script knows the outcome, and
 // broadcast the new readings to any connected dashboard over WebSocket.
 async function handleTelemetry(client, dongleId, payload) {
-  const messageId = payload.message_id ?? null;
+  const messageId = payload.message_id
+    ?? payload.messageId
+    ?? payload.MessageId
+    ?? payload.MessageID
+    ?? payload.MESSAGE_ID
+    ?? payload.msg_id
+    ?? payload.MsgId
+    ?? payload.msgId
+    ?? payload.msgID
+    ?? payload.id
+    ?? null;
   const mac = await getMacByDongleId(dongleId);
 
   if (!mac) {
@@ -208,6 +218,7 @@ async function handleTelemetry(client, dongleId, payload) {
   // what field names/casing her device is actually sending, in case a
   // sensor type goes missing again in the future.
   console.log(`[mqtt] Telemetry raw payload from dongle ${dongleId}:`, payload);
+  console.log(`[mqtt] Resolved message_id for dongle ${dongleId}: ${messageId} (raw keys: ${Object.keys(payload).join(', ')})`);
 
   const readings = extractReadings(payload);
 

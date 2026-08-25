@@ -3,7 +3,7 @@ import TelemetryChart, { HIGH_TEMP_THRESHOLD } from "./TelemetryChart";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
-const HISTORY_CAP = 200; // max points kept per chart series
+const HISTORY_CAP = 200;
 
 function useInterval(callback, delayMs) {
   useEffect(() => {
@@ -14,6 +14,7 @@ function useInterval(callback, delayMs) {
 }
 
 function timeAgo(iso) {
+  if (!iso) return "No heartbeat";
   const diff = Math.max(0, Date.now() - new Date(iso).getTime());
   const s = Math.floor(diff / 1000);
   if (s < 60) return `${s}s ago`;
@@ -28,16 +29,26 @@ export default function App() {
   const [latest, setLatest] = useState([]);
   const [feed, setFeed] = useState([]);
   const [connErr, setConnErr] = useState(null);
-  const [wsStatus, setWsStatus] = useState("connecting"); // connecting | connected | disconnected
+  const [wsStatus, setWsStatus] = useState("connecting");
 
   const [tempHistory, setTempHistory] = useState([]);
   const [humHistory, setHumHistory] = useState([]);
 
+  // Sidebar / Navigation states
+  const [selectedDevice, setSelectedDevice] = useState(null);
+  const [devicesExpanded, setDevicesExpanded] = useState(true);
+  const [viewMode, setViewMode] = useState("dashboard"); // dashboard | admin
+
+  // Date filters
+  const [startDate, setStartDate] = useState("24/08/2026");
+  const [endDate, setEndDate] = useState("25/08/2026");
+  const [quickRange, setQuickRange] = useState("Last 24 hrs");
+
+  // Admin / CSV Upload states
   const [csvFile, setCsvFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [uploadErr, setUploadErr] = useState(null);
-
   const fileInputRef = useRef(null);
 
   const loadDevices = useCallback(() => {
@@ -53,6 +64,13 @@ export default function App() {
   useEffect(() => {
     loadDevices();
   }, [loadDevices]);
+
+  // Set default selected device when loaded
+  useEffect(() => {
+    if (devices.length > 0 && !selectedDevice) {
+      setSelectedDevice(devices[0]);
+    }
+  }, [devices, selectedDevice]);
 
   async function uploadCsv(e) {
     if (e) e.preventDefault();
@@ -76,7 +94,7 @@ export default function App() {
         setUploadErr(data.error || `Upload failed (${res.status})`);
       } else {
         setUploadResult(data);
-        setCsvFile(null); // clear after successful upload
+        setCsvFile(null);
         if (fileInputRef.current) fileInputRef.current.value = "";
         loadDevices();
       }
@@ -105,7 +123,6 @@ export default function App() {
     if (hums.length) setHumHistory((prev) => [...prev, ...hums].slice(-HISTORY_CAP));
   }
 
-  // --- WebSocket: live push updates ---------------------------------
   const wsRef = useRef(null);
   useEffect(() => {
     let reconnectTimer;
@@ -162,7 +179,6 @@ export default function App() {
     };
   }, []);
 
-  // --- HTTP polling: fallback / initial load -------------------------
   const pollSensors = useCallback(() => {
     Promise.all([
       fetch(`${API_BASE}/api/sensors/latest`).then((r) => r.json()),
@@ -187,379 +203,445 @@ export default function App() {
   useInterval(pollSensors, 10000);
 
   const linkDown = connErr || wsStatus === "disconnected";
-  const hotSensors = latest.filter((s) => s.sensor_type === "temperature" && Number(s.value) > HIGH_TEMP_THRESHOLD);
 
-  // Statistics Calculations
-  const activeNodesCount = new Set(latest.map((s) => s.sensor_id)).size;
+  // Filter latest readings for the currently selected device's MAC address
+  const activeMac = selectedDevice?.mac_address || "";
+  const deviceReadings = latest.filter((s) => s.mac_address === activeMac);
   
-  const tempReadings = latest.filter((s) => s.sensor_type === "temperature");
-  const avgTemp = tempReadings.length
-    ? (tempReadings.reduce((sum, s) => sum + Number(s.value), 0) / tempReadings.length).toFixed(1)
-    : "N/A";
+  const getMetricVal = (type) => {
+    const r = deviceReadings.find((s) => s.sensor_type === type);
+    return r ? `${r.value} ${r.unit}` : "--";
+  };
 
-  const humReadings = latest.filter((s) => s.sensor_type === "humidity");
-  const avgHum = humReadings.length
-    ? (humReadings.reduce((sum, s) => sum + Number(s.value), 0) / humReadings.length).toFixed(1)
-    : "N/A";
+  const selectedDeviceLastActive = deviceReadings.length
+    ? new Date(Math.max(...deviceReadings.map((r) => new Date(r.received_at).getTime()))).toISOString()
+    : null;
+
+  // Filter trends to selected device for visual charts
+  const selectedTempTrend = tempHistory.filter((r) => r.mac_address === activeMac);
+  const selectedHumTrend = humHistory.filter((r) => r.mac_address === activeMac);
 
   return (
-    <div className="console">
-      {/* Top Navbar */}
-      <header className="topbar">
-        <div className="brand-wrapper">
-          <svg className="brand-icon" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="2" y="2" width="20" height="8" rx="2" ry="2" />
-            <rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
-            <line x1="6" y1="6" x2="6.01" y2="6" />
-            <line x1="6" y1="18" x2="6.01" y2="18" />
-          </svg>
-          <div className="brand">AERO<span>METRY</span> GATEWAY</div>
-        </div>
-        <div className={`status-badge ${linkDown ? "status--down" : "status--up"}`}>
-          <span style={{
-            width: "8px",
-            height: "8px",
-            borderRadius: "50%",
-            backgroundColor: linkDown ? "#ef4444" : "#10b981",
-            display: "inline-block",
-            marginRight: "6px"
-          }} />
-          {linkDown ? "Disconnected" : `Live (${wsStatus})`}
-        </div>
-      </header>
-
-      {/* Alert Banner */}
-      {hotSensors.length > 0 && (
-        <div className="alert-banner">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-            <line x1="12" y1="9" x2="12" y2="13" />
-            <line x1="12" y1="17" x2="12.01" y2="17" />
-          </svg>
-          <div className="alert-banner-content">
-            <strong>Critical Alert:</strong> Temperature threshold exceeded ({HIGH_TEMP_THRESHOLD}°C) on {hotSensors.length} active node{hotSensors.length > 1 ? "s" : ""}:{" "}
-            {hotSensors.map((s) => `${s.sensor_id} (${s.value}°C)`).join(", ")}
-          </div>
-        </div>
-      )}
-
-      {/* KPI Stats Row */}
-      <div className="stats-grid">
-        <div className="stat-card">
-          <div className="stat-icon-wrapper">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
-              <line x1="7" y1="2" x2="7" y2="22" />
-              <line x1="17" y1="2" x2="17" y2="22" />
-              <line x1="2" y1="12" x2="22" y2="12" />
+    <div className="remonet-layout">
+      {/* Sidebar Navigation */}
+      <aside className="sidebar">
+        <div className="sidebar-brand">
+          <div className="brand-logo">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
             </svg>
           </div>
-          <div className="stat-info">
-            <span className="stat-label">Registered Devices</span>
-            <span className="stat-value">{devices.length}</span>
-          </div>
+          <span className="brand-name">ReMoNet</span>
         </div>
 
-        <div className="stat-card">
-          <div className="stat-icon-wrapper success">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
+        <nav className="sidebar-nav">
+          <button 
+            className={`nav-item ${viewMode === "dashboard" && !selectedDevice ? "active" : ""}`}
+            onClick={() => { setViewMode("dashboard"); setSelectedDevice(devices[0] || null); }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
             </svg>
-          </div>
-          <div className="stat-info">
-            <span className="stat-label">Active Sensors</span>
-            <span className="stat-value">{activeNodesCount}</span>
-          </div>
-        </div>
+            Home
+          </button>
 
-        <div className="stat-card">
-          <div className="stat-icon-wrapper warning">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-          </div>
-          <div className="stat-info">
-            <span className="stat-label">Avg Temperature</span>
-            <span className="stat-value">{avgTemp !== "N/A" ? `${avgTemp}°C` : "N/A"}</span>
-          </div>
-        </div>
+          <div className="nav-group">
+            <button 
+              className="nav-item group-header"
+              onClick={() => setDevicesExpanded(!devicesExpanded)}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
+                <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                <line x1="7" y1="2" x2="7" y2="22" />
+                <line x1="17" y1="2" x2="17" y2="22" />
+                <line x1="2" y1="12" x2="22" y2="12" />
+              </svg>
+              Devices
+              <svg 
+                className={`chevron ${devicesExpanded ? "rotated" : ""}`} 
+                width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </button>
 
-        <div className="stat-card">
-          <div className="stat-icon-wrapper danger">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
-            </svg>
-          </div>
-          <div className="stat-info">
-            <span className="stat-label">Avg Humidity</span>
-            <span className="stat-value">{avgHum !== "N/A" ? `${avgHum}%` : "N/A"}</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Main Grid */}
-      <div className="dashboard-grid">
-        {/* Left Column: Chart and Live telemetry cards */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-          {/* Telemetry Charts Panel */}
-          <section className="panel">
-            <TelemetryChart temperature={tempHistory} humidity={humHistory} />
-          </section>
-
-          {/* Live Sensors Grid */}
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title-group">
-                <h2>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
-                    <rect x="2" y="2" width="20" height="20" rx="2" ry="2" />
-                    <path d="M12 18h.01" />
-                    <path d="M17 12h.01" />
-                    <path d="M7 12h.01" />
-                    <path d="M12 6h.01" />
-                  </svg>
-                  Active Sensor Readings
-                </h2>
-                <p className="panel-subtitle">Real-time status and metric payloads broadcasted by connected nodes</p>
-              </div>
-            </div>
-            
-            <div className="cards">
-              {latest
-                .slice()
-                .sort((a, b) => a.sensor_type.localeCompare(b.sensor_type))
-                .map((s) => {
-                  const isHot = s.sensor_type === "temperature" && Number(s.value) > HIGH_TEMP_THRESHOLD;
+            {devicesExpanded && (
+              <div className="nav-sub-list">
+                {devices.map((d) => {
+                  const isActive = viewMode === "dashboard" && selectedDevice?.mac_address === d.mac_address;
                   return (
-                    <div
-                      className={`card ${isHot ? "card--hot" : ""}`}
-                      key={`${s.sensor_id}::${s.sensor_type}`}
+                    <button
+                      key={d.mac_address}
+                      className={`nav-sub-item ${isActive ? "active" : ""}`}
+                      onClick={() => {
+                        setSelectedDevice(d);
+                        setViewMode("dashboard");
+                      }}
                     >
-                      <div className="card-id">{s.sensor_id}</div>
-                      <div className="card-mac">{s.mac_address}</div>
-                      <div className="card-value">
-                        {s.value}
-                        <span className="unit">{s.unit}</span>
-                      </div>
-                      <div className="card-meta">
-                        {s.sensor_type} &middot; {timeAgo(s.received_at)}
-                      </div>
-                    </div>
+                      <span className="dot" />
+                      {d.dongle_id || d.product_type || "Energy Meter"}
+                    </button>
                   );
                 })}
-              {latest.length === 0 && (
-                <div style={{ gridColumn: "1 / -1", textAlign: "center", padding: "2rem 0" }} className="dim">
-                  Awaiting sensor connections. Sync the CSV registry to allow authorized nodes.
-                </div>
-              )}
-            </div>
-          </section>
-        </div>
+                {devices.length === 0 && (
+                  <span className="nav-sub-empty">No registered devices</span>
+                )}
+              </div>
+            )}
+          </div>
 
-        {/* Right Column: Upload, Registration Logs, Registered List, Raw Feed */}
-        <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
-          {/* CSV File Upload Registry */}
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title-group">
-                <h2>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="17 8 12 3 7 8" />
-                    <line x1="12" y1="3" x2="12" y2="15" />
+          <button 
+            className={`nav-item ${viewMode === "admin" ? "active" : ""}`}
+            onClick={() => setViewMode("admin")}
+            style={{ marginTop: "1rem" }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
+              <line x1="12" y1="5" x2="12" y2="19" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+            </svg>
+            + New / Modify
+          </button>
+
+          <button 
+            className={`nav-item ${viewMode === "admin" ? "active" : ""}`}
+            onClick={() => setViewMode("admin")}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+              <circle cx="12" cy="7" r="4" />
+            </svg>
+            Admin
+          </button>
+        </nav>
+      </aside>
+
+      {/* Main Content Area */}
+      <main className="main-content">
+        {viewMode === "dashboard" ? (
+          <>
+            {/* Dashboard Mode */}
+            <header className="main-header">
+              <div className="header-title-row">
+                <button className="back-btn" onClick={() => setSelectedDevice(null)}>
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <line x1="19" y1="12" x2="5" y2="12" />
+                    <polyline points="12 19 5 12 12 5" />
                   </svg>
-                  Sync Device Registry
-                </h2>
-                <p className="panel-subtitle">Upload authorized node configuration profiles (CSV format)</p>
+                </button>
+                <h1 className="header-title">
+                  {selectedDevice ? (selectedDevice.dongle_id || selectedDevice.product_type).toUpperCase() : "DASHBOARD"}
+                </h1>
               </div>
+
+              <div className="header-status">
+                <div className={`status-badge-indicator ${linkDown ? "offline" : "online"}`}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="status-icon">
+                    {linkDown ? (
+                      <path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.5M5 12.5a10.94 10.94 0 0 1 5.83-2.84M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01" />
+                    ) : (
+                      <path d="M5 12.5a10.87 10.87 0 0 1 14 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01" />
+                    )}
+                  </svg>
+                  {linkDown ? "Offline" : "Online"}
+                </div>
+              </div>
+            </header>
+
+            {/* Filter Bar */}
+            <div className="filter-bar">
+              <div className="filter-group">
+                <label className="filter-label">Quick Range</label>
+                <select 
+                  className="filter-select" 
+                  value={quickRange}
+                  onChange={(e) => setQuickRange(e.target.value)}
+                >
+                  <option>Last 24 hrs</option>
+                  <option>Last 7 days</option>
+                  <option>Last 30 days</option>
+                </select>
+              </div>
+
+              <div className="filter-group">
+                <label className="filter-label">Start Date</label>
+                <div className="date-input-wrapper">
+                  <input 
+                    type="text" 
+                    className="filter-input" 
+                    value={startDate} 
+                    onChange={(e) => setStartDate(e.target.value)}
+                  />
+                  <svg className="calendar-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                    <line x1="16" y1="2" x2="16" y2="6" />
+                    <line x1="8" y1="2" x2="8" y2="6" />
+                    <line x1="3" y1="10" x2="21" y2="10" />
+                  </svg>
+                </div>
+              </div>
+
+              <div className="filter-group">
+                <label className="filter-label">End Date</label>
+                <div className="date-input-wrapper">
+                  <input 
+                    type="text" 
+                    className="filter-input" 
+                    value={endDate} 
+                    onChange={(e) => setEndDate(e.target.value)}
+                  />
+                  <svg className="calendar-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+                    <line x1="16" y1="2" x2="16" y2="6" />
+                    <line x1="8" y1="2" x2="8" y2="6" />
+                    <line x1="3" y1="10" x2="21" y2="10" />
+                  </svg>
+                </div>
+              </div>
+
+              <button className="btn-load-data">Load Data</button>
+              <button className="btn-set-interval">Set Interval</button>
             </div>
 
-            <div 
-              className="upload-zone" 
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <svg className="upload-icon" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-                <line x1="12" y1="18" x2="12" y2="12" />
-                <line x1="9" y1="15" x2="15" y2="15" />
-              </svg>
-              <div className="upload-text">
-                <strong>Click to choose file</strong> or drag & drop authorized device registry list
-              </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,text/csv"
-                className="file-input-hidden"
-                onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
-              />
-              
-              {csvFile && (
-                <div className="selected-file-banner" onClick={(e) => e.stopPropagation()}>
-                  <div className="file-details">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                      <polyline points="14 2 14 8 20 8" />
-                    </svg>
-                    <span>{csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)</span>
+            {/* Content Dashboard Grid */}
+            {selectedDevice ? (
+              <div className="dashboard-grid-layout">
+                {/* Left Column: Device Info & Metrics */}
+                <div className="column-left">
+                  {/* Device Info Panel */}
+                  <div className="dashboard-card">
+                    <h2 className="card-title">Device Information</h2>
+                    <div className="card-content-list">
+                      <div className="info-row">
+                        <span className="info-label">Serial Number</span>
+                        <span className="info-val">{selectedDevice.serial_number}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Product Type</span>
+                        <span className="info-val">{selectedDevice.product_type}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Last Updated</span>
+                        <span className="info-val">{selectedDeviceLastActive ? timeAgo(selectedDeviceLastActive) : "No heartbeat"}</span>
+                      </div>
+                    </div>
                   </div>
-                  <button className="file-remove-btn" onClick={() => setCsvFile(null)}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
+
+                  {/* Sensor Metrics Panel */}
+                  <div className="dashboard-card">
+                    <div className="metrics-header-row">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="metrics-header-icon">
+                        <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                        <line x1="7" y1="2" x2="7" y2="22" />
+                        <line x1="17" y1="2" x2="17" y2="22" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                      </svg>
+                      <h2 className="card-title">Energy Metrics</h2>
+                    </div>
+
+                    <div className="card-content-list dotted-separators">
+                      <div className="info-row">
+                        <span className="info-label">Temperature</span>
+                        <span className="info-val">{getMetricVal("temperature")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Humidity</span>
+                        <span className="info-val">{getMetricVal("humidity")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Accelerometer X</span>
+                        <span className="info-val">{getMetricVal("accelerometer_x")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Accelerometer Y</span>
+                        <span className="info-val">{getMetricVal("accelerometer_y")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Accelerometer Z</span>
+                        <span className="info-val">{getMetricVal("accelerometer_z")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Gyroscope X</span>
+                        <span className="info-val">{getMetricVal("gyroscope_x")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Gyroscope Y</span>
+                        <span className="info-val">{getMetricVal("gyroscope_y")}</span>
+                      </div>
+                      <div className="info-row">
+                        <span className="info-label">Gyroscope Z</span>
+                        <span className="info-val">{getMetricVal("gyroscope_z")}</span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-              )}
-            </div>
 
-            {csvFile && (
-              <button 
-                type="button" 
-                onClick={uploadCsv} 
-                className="upload-action-btn"
-                disabled={uploading}
-              >
-                {uploading ? "Synchronizing..." : "Upload & Apply Registry"}
-              </button>
-            )}
-
-            {uploadErr && <div className="err" style={{ fontSize: "0.8rem", fontWeight: "500" }}>{uploadErr}</div>}
-            {uploadResult && (
-              <div className="ok" style={{ fontSize: "0.8rem", fontWeight: "500" }}>
-                Success: Sync complete ({uploadResult.added.length} added, {uploadResult.removed.length} removed, {uploadResult.total_registered} total registered nodes).
+                {/* Right Column: Sensor Trend Graph */}
+                <div className="column-right">
+                  <div className="dashboard-card chart-card">
+                    <TelemetryChart temperature={selectedTempTrend} humidity={selectedHumTrend} />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="empty-selection-placeholder">
+                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
+                  <line x1="7" y1="2" x2="7" y2="22" />
+                </line>
+                <p>Select a device from the sidebar to display real-time sensor metrics and analysis trend lines.</p>
               </div>
             )}
-          </section>
 
-          {/* Registration Attempt Logs */}
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title-group">
-                <h2>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
-                    <path d="M12 20h9M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+            {/* Footer Bar */}
+            <footer className="main-footer-nav">
+              <span className="footer-status">Showing Page 1 (Last {tempHistory.length + humHistory.length} points)</span>
+              <div className="footer-pagination">
+                <button className="btn-pagination" disabled>Previous</button>
+                <button className="btn-pagination" disabled>Next</button>
+              </div>
+            </footer>
+          </>
+        ) : (
+          <>
+            {/* Administration / CSV Upload Mode */}
+            <header className="main-header">
+              <h1 className="header-title">ADMINISTRATIVE GATEWAY</h1>
+            </header>
+
+            <div className="admin-grid-layout">
+              {/* CSV Upload Profile Card */}
+              <div className="dashboard-card">
+                <h2 className="card-title">Sync Device Registry</h2>
+                <div className="upload-zone" onClick={() => fileInputRef.current?.click()}>
+                  <svg className="upload-icon" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
                   </svg>
-                  Network Access Attempts
-                </h2>
-                <p className="panel-subtitle">Audited authentication logs for sensor handshake handshakes</p>
+                  <p className="upload-text">Click to choose a CSV device configuration profile or drag it here</p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    className="file-input-hidden"
+                    onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
+                  />
+                  {csvFile && (
+                    <div className="selected-file-banner" onClick={(e) => e.stopPropagation()}>
+                      <span>{csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)</span>
+                      <button className="file-remove-btn" onClick={() => setCsvFile(null)}>×</button>
+                    </div>
+                  )}
+                </div>
+
+                {csvFile && (
+                  <button type="button" onClick={uploadCsv} className="upload-action-btn" disabled={uploading}>
+                    {uploading ? "Applying..." : "Sync Devices List"}
+                  </button>
+                )}
+
+                {uploadErr && <p className="err-text">{uploadErr}</p>}
+                {uploadResult && (
+                  <p className="ok-text">
+                    Synced: {uploadResult.added.length} added, {uploadResult.removed.length} removed, {uploadResult.total_registered} total registered.
+                  </p>
+                )}
+              </div>
+
+              {/* Registered Devices List */}
+              <div className="dashboard-card">
+                <h2 className="card-title">Active Gateway Registry</h2>
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>MAC Address</th>
+                        <th>Serial Number</th>
+                        <th>Product Type</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {devices.map((d, i) => (
+                        <tr key={i}>
+                          <td>{d.mac_address}</td>
+                          <td>{d.serial_number}</td>
+                          <td>{d.product_type}</td>
+                        </tr>
+                      ))}
+                      {devices.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="empty-text">No registered devices. Upload registry profile above.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Handshake Attempts Log */}
+              <div className="dashboard-card">
+                <h2 className="card-title">Network Access Handshakes</h2>
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Timestamp</th>
+                        <th>MAC Address</th>
+                        <th>Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {regLog.map((r, i) => (
+                        <tr key={i}>
+                          <td>{new Date(r.time).toLocaleTimeString()}</td>
+                          <td>{r.mac}</td>
+                          <td className={r.result?.startsWith("ok") ? "ok-text" : "err-text"}>{r.result}</td>
+                        </tr>
+                      ))}
+                      {regLog.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="empty-text">No handshakes registered yet.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Real-time Streams WebSocket Feed */}
+              <div className="dashboard-card">
+                <h2 className="card-title">Live Signal Streams</h2>
+                <div className="table-container">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Timestamp</th>
+                        <th>Sensor ID</th>
+                        <th>Metric</th>
+                        <th>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {feed.map((r, i) => (
+                        <tr key={r.id ?? `${r.sensor_id}-${r.sensor_type}-${r.received_at}-${i}`}>
+                          <td>{new Date(r.received_at).toLocaleTimeString()}</td>
+                          <td>{r.sensor_id}</td>
+                          <td>{r.sensor_type}</td>
+                          <td>{r.value}{r.unit}</td>
+                        </tr>
+                      ))}
+                      {feed.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="empty-text">No incoming telemetry logs.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
-
-            <div className="table-container" style={{ maxHeight: "200px" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>MAC Address</th>
-                    <th>Result</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {regLog.map((r, i) => (
-                    <tr key={i}>
-                      <td style={{ whiteSpace: "nowrap" }}>{new Date(r.time).toLocaleTimeString()}</td>
-                      <td style={{ fontFamily: "monospace" }}>{r.mac || <span className="dim">—</span>}</td>
-                      <td className={r.result?.startsWith("ok") ? "ok" : "err"} style={{ fontWeight: "600" }}>{r.result}</td>
-                    </tr>
-                  ))}
-                  {regLog.length === 0 && (
-                    <tr>
-                      <td colSpan={3} style={{ textAlign: "center" }} className="dim">No authentication attempts recorded.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          {/* Registered Devices Registry */}
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title-group">
-                <h2>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
-                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                  </svg>
-                  Authorized Registry List
-                </h2>
-                <p className="panel-subtitle">Verified hardware profiles allowed on this gateway</p>
-              </div>
-            </div>
-
-            {devicesErr && <div className="err" style={{ fontSize: "0.8rem" }}>Failed to fetch active registry: {devicesErr}</div>}
-            
-            <div className="table-container" style={{ maxHeight: "200px" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>MAC Address</th>
-                    <th>Serial Number</th>
-                    <th>Product Type</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {devices.map((d, i) => (
-                    <tr key={i}>
-                      <td style={{ fontFamily: "monospace" }}>{d.mac_address}</td>
-                      <td>{d.serial_number}</td>
-                      <td>{d.product_type}</td>
-                    </tr>
-                  ))}
-                  {devices.length === 0 && !devicesErr && (
-                    <tr>
-                      <td colSpan={3} style={{ textAlign: "center" }} className="dim">Registry empty. Upload configuration profile.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          {/* Raw Feed WebSocket Logs */}
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title-group">
-                <h2>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}>
-                    <path d="M21 12a9 9 0 0 1-9 9m9-9a9 9 0 0 0-9-9m9 9H3m9 9a9 9 0 0 1-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9" />
-                  </svg>
-                  Live Signal Streams
-                </h2>
-                <p className="panel-subtitle">Incoming stream payloads received over active WebSockets</p>
-              </div>
-            </div>
-
-            <div className="table-container" style={{ maxHeight: "250px" }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Sensor</th>
-                    <th>Type</th>
-                    <th>Val</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {feed.map((r, i) => (
-                    <tr key={r.id ?? `${r.sensor_id}-${r.sensor_type}-${r.received_at}-${i}`}>
-                      <td>{new Date(r.received_at).toLocaleTimeString()}</td>
-                      <td>{r.sensor_id}</td>
-                      <td style={{ textTransform: "capitalize" }}>{r.sensor_type}</td>
-                      <td style={{ fontWeight: "600" }}>{r.value}{r.unit}</td>
-                    </tr>
-                  ))}
-                  {feed.length === 0 && (
-                    <tr>
-                      <td colSpan={4} style={{ textAlign: "center" }} className="dim">No telemetry stream connected.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-      </div>
+          </>
+        )}
+      </main>
     </div>
   );
 }
