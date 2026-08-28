@@ -2,7 +2,15 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import TelemetryChart, { HIGH_TEMP_THRESHOLD } from "./TelemetryChart";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
-const WS_BASE = API_BASE.replace(/^http/, "ws");
+const API_KEY = import.meta.env.VITE_API_KEY || "";
+// Note: this key is baked into the built JS bundle and is visible to
+// anyone who opens devtools on the dashboard. That's an accepted
+// trade-off for a small/internal deployment — it stops random internet
+// traffic from hitting the API, but it does NOT hide the key from
+// someone who already has access to the dashboard itself. Don't reuse
+// this key for anything more sensitive than this project.
+const AUTH_HEADERS = { "x-api-key": API_KEY };
+const WS_BASE = `${API_BASE.replace(/^http/, "ws")}/?apiKey=${encodeURIComponent(API_KEY)}`;
 const HISTORY_CAP = 200;
 
 function useInterval(callback, delayMs) {
@@ -52,7 +60,7 @@ export default function App() {
   const fileInputRef = useRef(null);
 
   const loadDevices = useCallback(() => {
-    fetch(`${API_BASE}/api/devices`)
+    fetch(`${API_BASE}/api/devices`, { headers: AUTH_HEADERS })
       .then((r) => r.json())
       .then((data) => {
         setDevices(data);
@@ -86,6 +94,7 @@ export default function App() {
 
       const res = await fetch(`${API_BASE}/api/devices/upload`, {
         method: "POST",
+        headers: AUTH_HEADERS,
         body: formData,
       });
       const data = await res.json();
@@ -181,10 +190,10 @@ export default function App() {
 
   const pollSensors = useCallback(() => {
     Promise.all([
-      fetch(`${API_BASE}/api/sensors/latest`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/sensors?limit=25`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/sensors?limit=200`).then((r) => r.json()),
-      fetch(`${API_BASE}/api/debug/reg-log`).then((r) => r.json()),
+      fetch(`${API_BASE}/api/sensors/latest`, { headers: AUTH_HEADERS }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/sensors?limit=25`, { headers: AUTH_HEADERS }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/sensors?limit=200`, { headers: AUTH_HEADERS }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/debug/reg-log`, { headers: AUTH_HEADERS }).then((r) => r.json()),
     ])
       .then(([latestRows, feedRows, historyRows, regLogRows]) => {
         setLatest(Array.isArray(latestRows) ? latestRows : []);
