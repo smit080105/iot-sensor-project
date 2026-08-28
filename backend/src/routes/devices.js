@@ -2,9 +2,28 @@ const express = require("express");
 const multer = require("multer");
 const pool = require("../db");
 const { syncDevicesFromCsvText } = require("../csvSync");
+const { uploadLimiter } = require("../middleware/rateLimit");
 
 const router = express.Router();
-const upload = multer({ storage: multer.memoryStorage() });
+
+// Only .csv files, capped at 1MB (a device registry is a handful of rows
+// per device — 1MB is enormous headroom for that and still small enough
+// that even repeated abuse can't meaningfully strain memory, since the
+// whole thing is buffered in RAM via memoryStorage()).
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1 * 1024 * 1024, files: 1 },
+  fileFilter: (req, file, cb) => {
+    const looksLikeCsv =
+      file.mimetype === "text/csv" ||
+      file.mimetype === "application/vnd.ms-excel" ||
+      file.originalname.toLowerCase().endsWith(".csv");
+    if (!looksLikeCsv) {
+      return cb(new Error("Only .csv files are accepted"));
+    }
+    cb(null, true);
+  },
+});
 
 // GET /api/devices — full registry (from Postgres, kept in sync with the last uploaded CSV)
 router.get("/", async (req, res) => {
@@ -23,7 +42,7 @@ router.get("/", async (req, res) => {
 // This CSV IS the registry now: adds any row with a mac_address +
 // dongle_id that isn't registered yet, removes any previously-registered
 // device no longer in this CSV, and rejects any row missing either field.
-router.post("/upload", upload.single("file"), async (req, res) => {
+router.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No CSV file uploaded (expected form field 'file')" });
   }
@@ -42,6 +61,16 @@ router.post("/upload", upload.single("file"), async (req, res) => {
     console.error("[devices] CSV upload failed:", err.message);
     res.status(400).json({ error: `Could not process CSV: ${err.message}` });
   }
+});
+
+// Multer errors (file too big, wrong type, etc.) throw before reaching the
+// handler above — this catches them and returns a clean 400 instead of a
+// raw 500 stack trace.
+router.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || err) {
+    return res.status(400).json({ error: err.message || "Upload failed" });
+  }
+  next();
 });
 
 // GET /api/devices/:mac — single device lookup (kept last: it's a catch-all param route)
