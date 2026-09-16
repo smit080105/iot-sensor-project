@@ -12,17 +12,38 @@ Both sides must connect to the same broker:
 
 | Setting | Value |
 |---|---|
-| Broker (plaintext) | `mqtt://broker.emqx.io:1883` |
-| Broker (TLS)        | `mqtts://broker.emqx.io:8883` |
+| Broker (TLS, **default now**) | `mqtts://broker.emqx.io:8883` |
+| Broker (plaintext, avoid) | `mqtt://broker.emqx.io:1883` |
 
 Set via `MQTT_URL` in `docker/.env` (or `backend/.env` for local runs).
+The backend now defaults to the TLS port automatically if `MQTT_URL`
+isn't set at all — you have to opt back into plaintext deliberately.
 
 **Note:** this is a genuinely public broker — anyone can publish or
 subscribe to any topic on it, with no authentication at the broker level.
-The topic names below are fixed (to match her existing script) rather
-than scoped with a random prefix, so the `PAIRING_TOKEN` check in step 1
-is the real protection against a stranger on the broker pretending to be
-her device. Don't publish anything sensitive through this broker.
+Switching to `mqtts://` (TLS) stops anyone from *sniffing the connection
+in transit* between your app and the broker, but it does **not** make
+the topics private — any other client connected to this same public
+broker can still subscribe to `DEVICE_reg` or `device_scd/+/telemetry`
+directly and see the same messages, because TLS only encrypts each
+client's own link to the broker, not the topic itself. The topic names
+below are fixed (to match her existing script) rather than scoped with a
+random prefix, so the `PAIRING_TOKEN` check in step 1 is the real
+protection against a stranger pretending to be her device — treat it as
+a real secret, not a password.
+
+`PAIRING_TOKEN` no longer has a hardcoded fallback value. The backend
+now refuses to start the MQTT subscriber if it isn't set, and warns on
+startup if it's shorter than 16 characters. Generate a strong one with:
+```
+node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+```
+
+For anything beyond a personal/demo project, don't stay on this shared
+public broker long-term — move to a private broker (self-hosted
+Mosquitto/EMQX, or a managed option like HiveMQ Cloud / AWS IoT Core)
+with per-device credentials and topic-level ACLs. Until then, don't
+publish anything sensitive through this broker.
 
 ## Topic names — case-sensitive
 

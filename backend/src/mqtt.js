@@ -3,12 +3,21 @@ const pool = require("./db");
 const { getDeviceByMac, getMacByDongleId } = require("./deviceRegistry");
 const { broadcast } = require("./ws");
 
-const MQTT_URL = process.env.MQTT_URL || "mqtt://broker.emqx.io:1883";
+// Default to the TLS listener on the public broker rather than plaintext
+// 1883. This only protects the connection in transit — it does NOT make
+// the broker private (anyone else connected to broker.emqx.io can still
+// subscribe to these exact topic names). For real device-fleet security,
+// move to a private broker with per-device credentials and topic ACLs.
+const MQTT_URL = process.env.MQTT_URL || "mqtts://broker.emqx.io:8883";
 
 // Shared secret her device includes in DEVICE_reg so we know the
 // registration request is genuinely from her, not a stranger on the
 // public broker. Must match exactly what she publishes.
-const PAIRING_TOKEN = process.env.PAIRING_TOKEN || "Shalaka";
+//
+// There is no hardcoded fallback anymore — a weak, well-known default
+// ("Shalaka") defeats the whole point of the check on a public broker
+// where anyone can read the topic. PAIRING_TOKEN must be set explicitly.
+const PAIRING_TOKEN = process.env.PAIRING_TOKEN;
 
 // Fixed topic names — MQTT topics are case-sensitive strings, so these
 // must match her script's casing EXACTLY or messages vanish with no
@@ -92,6 +101,20 @@ function getRecentRegAttempts() {
 }
 
 function startMqttSubscriber() {
+  if (!PAIRING_TOKEN) {
+    throw new Error(
+      "PAIRING_TOKEN is not set — refusing to start the MQTT subscriber. " +
+        "Set a long, random PAIRING_TOKEN in backend/.env (see .env.example)."
+    );
+  }
+  if (PAIRING_TOKEN.length < 16) {
+    console.warn(
+      "[mqtt] PAIRING_TOKEN is shorter than 16 characters — this token is sent in the clear " +
+        "on a public broker if MQTT_URL isn't using mqtts://, and is the only thing standing " +
+        "between a stranger and your device registrations. Use a long, random value."
+    );
+  }
+
   const client = mqtt.connect(MQTT_URL, {
     clientId: "backend-" + Math.random().toString(16).slice(2, 8),
   });

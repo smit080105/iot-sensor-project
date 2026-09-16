@@ -110,6 +110,20 @@ The entire environment is configured to run out-of-the-box using Docker Compose.
 
 ---
 
+## 🔒 Security
+
+All `/api/*` routes (except `/api/health`) and the WebSocket feed require
+an API key — see `backend/.env.example` (`API_KEY`) and
+`frontend/.env.example` (`VITE_API_KEY`, must match exactly). MQTT
+defaults to TLS (`mqtts://`), CSV uploads are rate-limited and capped at
+1MB/`.csv`-only, and CORS is locked to `ALLOWED_ORIGIN`.
+
+**Read [`SECURITY.md`](./SECURITY.md) before deploying this anywhere
+beyond your own machine** — it covers what's enforced, what you still
+need to configure (rotating the pairing token, setting your real
+origin), and the honest limits of this setup (shared public MQTT broker,
+browser-visible frontend API key).
+
 ## 🔧 Component Integrations
 
 *   **Database Integration**: Spawns an alpine-based PostgreSQL instance. Automatically executes [init.sql](file:///C:/Users/smitb/Downloads/iot-sensor-project-fixed-v3/database/init.sql) upon bootstrap to provision tables, indexes, and primary keys.

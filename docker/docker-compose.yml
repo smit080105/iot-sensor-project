@@ -18,8 +18,11 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "5432:5432"
+    # No "ports" mapping here on purpose — Postgres only needs to be
+    # reachable from the backend container over the internal iot-net
+    # network. Publishing 5432 to the host widens the attack surface for
+    # no benefit; use `docker exec -it postgres psql ...` if you need a
+    # local shell into it.
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ../database:/docker-entrypoint-initdb.d
@@ -49,6 +52,13 @@ services:
       # Shared secret her device includes in DEVICE_reg. Must match
       # exactly what she publishes, or registration requests get rejected.
       PAIRING_TOKEN: ${PAIRING_TOKEN}
+
+      # Required on every /api/* request (header: x-api-key) except
+      # /api/health, and on the WebSocket connection (?apiKey= query param).
+      API_KEY: ${API_KEY}
+
+      # Only this origin is allowed to call the API from a browser.
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN}
     ports:
       - "4000:4000"
     depends_on:
@@ -62,6 +72,12 @@ services:
       context: ../frontend
       args:
         VITE_API_BASE: ${VITE_API_BASE}
+        # Baked into the built JS bundle at build time, same as
+        # VITE_API_BASE. This is a browser-visible value, not a server
+        # secret — anyone using the dashboard can see it in devtools.
+        # It's still worth rotating alongside API_KEY since it's the
+        # value that has to match.
+        VITE_API_KEY: ${VITE_API_KEY}
     container_name: frontend
     ports:
       - "3000:80"
