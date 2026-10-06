@@ -3,8 +3,8 @@
 // handshake just reads/echoes rows from here, it never invents data.
 const pool = require("./db");
 
-// Used by DEVICE_reg: look up a device by MAC so we can echo its real
-// serial_number/dongle_id/product_type back on DEVICE_regok.
+// Used by remo_reg: look up a device by MAC so we can echo its real
+// serial_number/dongle_id/product_type back on remo_regOK.
 async function getDeviceByMac(mac) {
   const result = await pool.query(
     "SELECT mac_address, serial_number, product_type, dongle_id FROM devices WHERE mac_address = $1",

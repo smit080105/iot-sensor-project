@@ -1,17 +1,13 @@
 const { WebSocketServer } = require("ws");
 const { URL } = require("url");
-const { isValidApiKey } = require("./middleware/auth");
+const { verifyToken } = require("./authUtil");
 
 // Single shared WebSocket server instance, attached to the same HTTP
 // server the Express app listens on (see index.js). mqtt.js imports
 // `broadcast` from here to push live events to every connected dashboard
 // the instant something happens, instead of the dashboard having to poll.
 //
-// This stream carries the same sensitive data as the REST API (device
-// MACs, reg-log attempts, live telemetry), so it needs the same API-key
-// gate. Browsers can't set custom headers on a WebSocket handshake, so
-// the key travels as a query parameter instead: wss://host/?apiKey=...
-// (the frontend appends it automatically — see src/App.jsx).
+// Authenticated via JWT token query param: wss://host/?token=...
 
 let wss = null;
 
@@ -19,19 +15,21 @@ function initWebSocket(server) {
   wss = new WebSocketServer({
     server,
     verifyClient: (info, done) => {
-      let apiKey;
+      let token = null;
       try {
         const url = new URL(info.req.url, "http://localhost");
-        apiKey = url.searchParams.get("apiKey");
+        token = url.searchParams.get("token");
       } catch {
-        apiKey = null;
+        token = null;
       }
 
-      if (!isValidApiKey(apiKey)) {
-        console.warn("[ws] Rejected connection attempt — missing/invalid apiKey query param");
-        return done(false, 401, "Unauthorized");
+      // Check JWT token first
+      if (token && verifyToken(token)) {
+        return done(true);
       }
-      done(true);
+
+      console.warn("[ws] Rejected connection attempt: missing or invalid session token");
+      return done(false, 401, "Unauthorized");
     },
   });
 
@@ -45,7 +43,7 @@ function initWebSocket(server) {
     });
   });
 
-  console.log("[ws] WebSocket server attached to HTTP server (API-key protected)");
+  console.log("[ws] WebSocket server attached to HTTP server (session-token protected)");
 }
 
 // Send a JSON payload to every currently-connected dashboard client.

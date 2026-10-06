@@ -3,6 +3,8 @@ const multer = require("multer");
 const pool = require("../db");
 const { syncDevicesFromCsvText } = require("../csvSync");
 const { uploadLimiter } = require("../middleware/rateLimit");
+const { requireAdmin } = require("../middleware/auth");
+const { logAuditEvent, getClientIp } = require("../auditLogger");
 
 const router = express.Router();
 
@@ -42,7 +44,7 @@ router.get("/", async (req, res) => {
 // This CSV IS the registry now: adds any row with a mac_address +
 // dongle_id that isn't registered yet, removes any previously-registered
 // device no longer in this CSV, and rejects any row missing either field.
-router.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
+router.post("/upload", requireAdmin, uploadLimiter, upload.single("file"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: "No CSV file uploaded (expected form field 'file')" });
   }
@@ -50,6 +52,23 @@ router.post("/upload", uploadLimiter, upload.single("file"), async (req, res) =>
   try {
     const csvText = req.file.buffer.toString("utf-8");
     const summary = await syncDevicesFromCsvText(csvText);
+
+    logAuditEvent({
+      userId: req.user?.id || null,
+      username: req.user?.username || "admin",
+      action: "CSV_UPLOAD_SYNC",
+      resourceType: "DEVICE_REGISTRY",
+      resourceId: req.file.originalname,
+      ipAddress: getClientIp(req),
+      details: {
+        filename: req.file.originalname,
+        added: summary.added,
+        removed: summary.removed,
+        rejected: summary.rejected,
+        total_registered: summary.total,
+      },
+    });
+
     res.json({
       message: "CSV processed.",
       added: summary.added,

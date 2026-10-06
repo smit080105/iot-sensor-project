@@ -1,16 +1,5 @@
 const crypto = require("crypto");
-
-// All /api routes (except /api/health) require this header:
-//   x-api-key: <API_KEY>
-//
-// Constant-time comparison is used so response timing can't be used to
-// guess the key one byte at a time (a real, if minor, side-channel with
-// naive === comparisons on secrets).
-//
-// Fails closed: if API_KEY isn't configured at all, every request is
-// rejected with a 500 rather than silently allowing everyone through.
-// This is deliberate — a missing secret should break loudly in every
-// environment (including local dev), not just in production.
+const { verifyToken } = require("../authUtil");
 
 const API_KEY = process.env.API_KEY || "";
 
@@ -18,38 +7,81 @@ function timingSafeEqual(a, b) {
   const bufA = Buffer.from(String(a));
   const bufB = Buffer.from(String(b));
   if (bufA.length !== bufB.length) {
-    // Still run a comparison of equal-length buffers so the function
-    // takes similar time whether or not lengths matched, then return
-    // false — avoids leaking key length via early-return timing.
     crypto.timingSafeEqual(bufA, bufA);
     return false;
   }
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function requireApiKey(req, res, next) {
-  if (!API_KEY) {
-    console.error(
-      "[auth] API_KEY is not set — refusing all API requests. Set API_KEY in backend/.env (see .env.example)."
-    );
-    return res.status(500).json({ error: "Server misconfiguration: API key not set" });
-  }
-
-  const provided = req.header("x-api-key");
-  if (!provided || !timingSafeEqual(provided, API_KEY)) {
-    console.warn(`[auth] Rejected request to ${req.method} ${req.originalUrl} — missing/invalid x-api-key`);
-    return res.status(401).json({ error: "Unauthorized: missing or invalid API key" });
-  }
-
-  next();
-}
-
-// Used by the WebSocket upgrade handler, where there's no header to read
-// (browsers can't set custom headers on the WebSocket handshake), so the
-// key travels as a query parameter instead: wss://host/?apiKey=...
 function isValidApiKey(candidate) {
   if (!API_KEY || !candidate) return false;
   return timingSafeEqual(candidate, API_KEY);
 }
 
-module.exports = { requireApiKey, isValidApiKey };
+/**
+ * Universal Authentication Middleware
+ * Validates either:
+ * 1. Modern JWT session: Authorization: Bearer <token>
+ * 2. Legacy / Service Account header: x-api-key: <API_KEY>
+ */
+function authenticateToken(req, res, next) {
+  const authHeader = req.header("authorization") || req.header("Authorization");
+  let token = null;
+
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.slice(7).trim();
+  }
+
+  // 1. Verify JWT Token if provided
+  if (token) {
+    const decoded = verifyToken(token);
+    if (decoded) {
+      req.user = decoded;
+      return next();
+    }
+    console.warn(`[auth] Rejected request to ${req.method} ${req.originalUrl} — invalid/expired JWT token`);
+    return res.status(401).json({ error: "Session expired or invalid token. Please log in again." });
+  }
+
+  // 2. Fallback to API Key authentication
+  const providedApiKey = req.header("x-api-key");
+  if (providedApiKey && isValidApiKey(providedApiKey)) {
+    req.user = { id: 0, username: "api-service", role: "admin" };
+    return next();
+  }
+
+  console.warn(`[auth] Unauthorized access attempt to ${req.method} ${req.originalUrl}`);
+  return res.status(401).json({ error: "Unauthorized: Missing authentication token or valid API key." });
+}
+
+/**
+ * Role-Based Access Control (RBAC) Guard
+ * Ensures authenticated user has the required role (e.g. 'admin')
+ */
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthorized: Please log in." });
+    }
+    if (req.user.role !== role) {
+      console.warn(`[rbac] Access denied for user ${req.user.username} (${req.user.role}) — requires ${role}`);
+      return res.status(403).json({ error: `Forbidden: This action requires '${role}' privileges.` });
+    }
+    next();
+  };
+}
+
+// Shorthand for Admin-only routes (CSV upload, registry modifications)
+const requireAdmin = requireRole("admin");
+
+// Backward-compatible alias
+const requireApiKey = authenticateToken;
+
+module.exports = {
+  authenticateToken,
+  requireRole,
+  requireAdmin,
+  requireApiKey,
+  isValidApiKey,
+  timingSafeEqual,
+};
