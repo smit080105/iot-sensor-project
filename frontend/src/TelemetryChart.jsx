@@ -19,7 +19,7 @@ const COLOR_BG_TOOLTIP = "#ffffff";
 const COLOR_BORDER_TOOLTIP = "#cbd5e1";
 
 function fmtTime(iso) {
-  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 // Pair temp and humidity points bucketed to nearest 5s

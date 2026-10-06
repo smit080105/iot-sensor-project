@@ -1,84 +1,242 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
-import TelemetryChart, { HIGH_TEMP_THRESHOLD } from "./TelemetryChart";
+import React, { useEffect, useState, useCallback } from "react";
+import TelemetryChart from "./TelemetryChart";
+import Login from "./Login";
+import Sidebar from "./components/Sidebar";
+import DashboardHeader from "./components/DashboardHeader";
+import FilterBar from "./components/FilterBar";
+import DeviceInfoPanel from "./components/DeviceInfoPanel";
+import EnergyMetricsPanel from "./components/EnergyMetricsPanel";
+import DeviceHeartbeatPanel from "./components/DeviceHeartbeatPanel";
+import LiveFeedPanel from "./components/LiveFeedPanel";
+import AdminPanel from "./components/AdminPanel";
+import AlertsDrawer from "./components/AlertsDrawer";
+import { useIoTWebSocket } from "./hooks/useIoTWebSocket";
+import { useInterval } from "./hooks/useInterval";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:4000";
-const API_KEY = import.meta.env.VITE_API_KEY || "";
-// Note: this key is baked into the built JS bundle and is visible to
-// anyone who opens devtools on the dashboard. That's an accepted
-// trade-off for a small/internal deployment — it stops random internet
-// traffic from hitting the API, but it does NOT hide the key from
-// someone who already has access to the dashboard itself. Don't reuse
-// this key for anything more sensitive than this project.
-const AUTH_HEADERS = { "x-api-key": API_KEY };
-const WS_BASE = `${API_BASE.replace(/^http/, "ws")}/?apiKey=${encodeURIComponent(API_KEY)}`;
-const HISTORY_CAP = 200;
-
-function useInterval(callback, delayMs) {
-  useEffect(() => {
-    callback();
-    const id = setInterval(callback, delayMs);
-    return () => clearInterval(id);
-  }, [callback, delayMs]);
+function localDateInputValue(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-function timeAgo(iso) {
-  if (!iso) return "No heartbeat";
-  const diff = Math.max(0, Date.now() - new Date(iso).getTime());
-  const s = Math.floor(diff / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s ago`;
+function rangeDates(range, now = new Date()) {
+  const end = localDateInputValue(now);
+  const startDate = new Date(now);
+  startDate.setHours(0, 0, 0, 0);
+  startDate.setDate(startDate.getDate() - (range === "Last 7 days" ? 6 : range === "Last 30 days" ? 29 : 0));
+  return { start: localDateInputValue(startDate), end };
 }
 
 export default function App() {
+  // Authentication & session state
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem("remonet_token") || null);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem("remonet_user");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Device registry & UI navigation
   const [devices, setDevices] = useState([]);
   const [devicesErr, setDevicesErr] = useState(null);
-  const [regLog, setRegLog] = useState([]);
-  const [latest, setLatest] = useState([]);
-  const [feed, setFeed] = useState([]);
-  const [connErr, setConnErr] = useState(null);
-  const [wsStatus, setWsStatus] = useState("connecting");
-
-  const [tempHistory, setTempHistory] = useState([]);
-  const [humHistory, setHumHistory] = useState([]);
-
-  // Sidebar / Navigation states
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [devicesExpanded, setDevicesExpanded] = useState(true);
-  const [viewMode, setViewMode] = useState("dashboard"); // dashboard | admin
+  const [viewMode, setViewMode] = useState("dashboard"); // 'dashboard' | 'admin'
 
   // Date filters
-  const [startDate, setStartDate] = useState("24/08/2026");
-  const [endDate, setEndDate] = useState("25/08/2026");
+  const [initialRange] = useState(() => rangeDates("Last 24 hrs"));
+  const [startDate, setStartDate] = useState(initialRange.start);
+  const [endDate, setEndDate] = useState(initialRange.end);
   const [quickRange, setQuickRange] = useState("Last 24 hrs");
+  const [chartTemperature, setChartTemperature] = useState([]);
+  const [chartHumidity, setChartHumidity] = useState([]);
 
-  // Admin / CSV Upload states
+  // Alerts & Incident drawer
+  const [isAlertDrawerOpen, setIsAlertDrawerOpen] = useState(false);
+  const [alertFilter, setAlertFilter] = useState("ACTIVE");
+
+  // CSV upload state
   const [csvFile, setCsvFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState(null);
   const [uploadErr, setUploadErr] = useState(null);
-  const fileInputRef = useRef(null);
+
+  // Audit logs state
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [auditSummary, setAuditSummary] = useState(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditFilterAction, setAuditFilterAction] = useState("");
+
+  // WebSocket real-time subscription
+  const {
+    wsStatus,
+    connErr,
+    setConnErr,
+    feed,
+    setFeed,
+    latest,
+    setLatest,
+    regLog,
+    setRegLog,
+    deviceStatuses,
+    setDeviceStatuses,
+    deviceFeeds,
+    setDeviceFeeds,
+    tempHistory,
+    setTempHistory,
+    humHistory,
+    setHumHistory,
+    alerts,
+    setAlerts,
+    alertSummary,
+    setAlertSummary,
+  } = useIoTWebSocket({ apiBase: API_BASE, authToken });
+
+  const getAuthHeaders = useCallback(() => {
+    const headers = {};
+    if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+    return headers;
+  }, [authToken]);
+
+  const handleLogin = useCallback((token, user) => {
+    setAuthToken(token);
+    setCurrentUser(user);
+    localStorage.setItem("remonet_token", token);
+    localStorage.setItem("remonet_user", JSON.stringify(user));
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    setAuthToken(null);
+    setCurrentUser(null);
+    localStorage.removeItem("remonet_token");
+    localStorage.removeItem("remonet_user");
+    setViewMode("dashboard");
+  }, []);
 
   const loadDevices = useCallback(() => {
-    fetch(`${API_BASE}/api/devices`, { headers: AUTH_HEADERS })
-      .then((r) => r.json())
+    if (!authToken) return;
+    fetch(`${API_BASE}/api/devices`, { headers: getAuthHeaders() })
+      .then((r) => {
+        if (r.status === 401) {
+          handleLogout();
+          throw new Error("Session expired");
+        }
+        return r.json();
+      })
       .then((data) => {
-        setDevices(data);
-        setDevicesErr(null);
+        if (Array.isArray(data)) {
+          setDevices(data);
+          setDevicesErr(null);
+        }
       })
       .catch((e) => setDevicesErr(e.message));
-  }, []);
+  }, [authToken, getAuthHeaders, handleLogout]);
 
   useEffect(() => {
     loadDevices();
   }, [loadDevices]);
 
-  // Set default selected device when loaded
+  // Set default selected device on load
   useEffect(() => {
     if (devices.length > 0 && !selectedDevice) {
       setSelectedDevice(devices[0]);
     }
   }, [devices, selectedDevice]);
+
+  const loadAuditLogs = useCallback(() => {
+    if (!authToken || currentUser?.role !== "admin") return;
+    setAuditLoading(true);
+    const query = auditFilterAction
+      ? `?action=${encodeURIComponent(auditFilterAction)}&limit=100`
+      : `?limit=100`;
+
+    Promise.all([
+      fetch(`${API_BASE}/api/audit${query}`, { headers: getAuthHeaders() }).then((r) => {
+        if (r.status === 401) handleLogout();
+        return r.json();
+      }),
+      fetch(`${API_BASE}/api/audit/summary`, { headers: getAuthHeaders() }).then((r) => r.json()),
+    ])
+      .then(([logs, summary]) => {
+        if (Array.isArray(logs)) setAuditLogs(logs);
+        if (summary && !summary.error) setAuditSummary(summary);
+      })
+      .catch((e) => console.warn("Failed to load audit records:", e))
+      .finally(() => setAuditLoading(false));
+  }, [authToken, currentUser, auditFilterAction, getAuthHeaders, handleLogout]);
+
+  useEffect(() => {
+    if (viewMode === "admin" && currentUser?.role === "admin") {
+      loadAuditLogs();
+    }
+  }, [viewMode, currentUser, loadAuditLogs]);
+
+  const pollSensors = useCallback(() => {
+    if (!authToken) return;
+    const h = getAuthHeaders();
+    Promise.all([
+      fetch(`${API_BASE}/api/sensors/latest`, { headers: h }).then((r) => {
+        if (r.status === 401) handleLogout();
+        return r.json();
+      }),
+      fetch(`${API_BASE}/api/sensors?limit=25`, { headers: h }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/debug/reg-log`, { headers: h }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/status`, { headers: h }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/feed`, { headers: h }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/alerts?status=${alertFilter === "ALL" ? "" : "ACTIVE"}`, { headers: h }).then((r) => r.json()),
+      fetch(`${API_BASE}/api/alerts/summary`, { headers: h }).then((r) => r.json()),
+    ])
+      .then(([latestRows, feedRows, regLogRows, statusRows, deviceFeedRows, alertsData, summaryData]) => {
+        setLatest(Array.isArray(latestRows) ? latestRows : []);
+        setFeed(Array.isArray(feedRows) ? feedRows : []);
+
+        setRegLog(Array.isArray(regLogRows) ? regLogRows : []);
+
+        if (Array.isArray(statusRows)) {
+          setDeviceStatuses(Object.fromEntries(statusRows.map((s) => [s.dongle_id, s])));
+        }
+        if (Array.isArray(deviceFeedRows)) {
+          setDeviceFeeds(Object.fromEntries(deviceFeedRows.map((f) => [f.dongle_id, f])));
+        }
+
+        if (Array.isArray(alertsData)) setAlerts(alertsData);
+        if (summaryData && typeof summaryData.active_total === "number") setAlertSummary(summaryData);
+
+        setConnErr(null);
+      })
+      .catch((e) => setConnErr(e.message));
+  }, [authToken, alertFilter, getAuthHeaders, handleLogout, setLatest, setFeed, setTempHistory, setHumHistory, setRegLog, setDeviceStatuses, setDeviceFeeds, setAlerts, setAlertSummary, setConnErr]);
+
+  const loadChartHistory = useCallback(async () => {
+    if (!authToken || !selectedDevice?.mac_address) return;
+    if (!startDate || !endDate || startDate > endDate) {
+      setConnErr("Choose a valid date range (start date must not be after end date).");
+      return;
+    }
+    try {
+      const query = new URLSearchParams({ start: startDate, end: endDate, mac_address: selectedDevice.mac_address, range: quickRange });
+      const response = await fetch(`${API_BASE}/api/sensors/history?${query}`, { headers: getAuthHeaders() });
+      const rows = await response.json();
+      if (!response.ok) throw new Error(rows.error || `Could not load history (${response.status})`);
+      const sortedRows = Array.isArray(rows) ? rows : [];
+      setChartTemperature(sortedRows.filter((r) => r.sensor_type === "temperature"));
+      setChartHumidity(sortedRows.filter((r) => r.sensor_type === "humidity"));
+      setConnErr(null);
+    } catch (error) {
+      setConnErr(error.message);
+    }
+  }, [authToken, selectedDevice, startDate, endDate, quickRange, getAuthHeaders, setConnErr]);
+
+  useEffect(() => {
+    if (selectedDevice) loadChartHistory();
+  }, [selectedDevice, loadChartHistory]);
+
+  useInterval(pollSensors, 10000);
 
   async function uploadCsv(e) {
     if (e) e.preventDefault();
@@ -94,7 +252,7 @@ export default function App() {
 
       const res = await fetch(`${API_BASE}/api/devices/upload`, {
         method: "POST",
-        headers: AUTH_HEADERS,
+        headers: getAuthHeaders(),
         body: formData,
       });
       const data = await res.json();
@@ -104,8 +262,8 @@ export default function App() {
       } else {
         setUploadResult(data);
         setCsvFile(null);
-        if (fileInputRef.current) fileInputRef.current.value = "";
         loadDevices();
+        loadAuditLogs();
       }
     } catch (err) {
       setUploadErr(err.message);
@@ -114,381 +272,118 @@ export default function App() {
     }
   }
 
-  function mergeLatest(prev, rows) {
-    const copy = [...prev];
-    for (const r of rows) {
-      const key = `${r.sensor_id}::${r.sensor_type}`;
-      const idx = copy.findIndex((s) => `${s.sensor_id}::${s.sensor_type}` === key);
-      if (idx >= 0) copy[idx] = r;
-      else copy.push(r);
+  const acknowledgeAlert = async (id) => {
+    try {
+      await fetch(`${API_BASE}/api/alerts/${id}/acknowledge`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      pollSensors();
+      if (currentUser?.role === "admin") loadAuditLogs();
+    } catch (err) {
+      console.error("Failed to acknowledge alert:", err);
     }
-    return copy;
-  }
+  };
 
-  function appendHistory(rows) {
-    const temps = rows.filter((r) => r.sensor_type === "temperature");
-    const hums = rows.filter((r) => r.sensor_type === "humidity");
-    if (temps.length) setTempHistory((prev) => [...prev, ...temps].slice(-HISTORY_CAP));
-    if (hums.length) setHumHistory((prev) => [...prev, ...hums].slice(-HISTORY_CAP));
-  }
-
-  const wsRef = useRef(null);
-  useEffect(() => {
-    let reconnectTimer;
-    let cancelled = false;
-
-    function connect() {
-      const ws = new WebSocket(WS_BASE);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setWsStatus("connected");
-        setConnErr(null);
-      };
-
-      ws.onmessage = (evt) => {
-        try {
-          const msg = JSON.parse(evt.data);
-
-          if (msg.type === "raw-feed") {
-            const rows = Array.isArray(msg.data) ? msg.data : [msg.data];
-            setFeed((prev) => [...rows, ...prev].slice(0, 50));
-            setLatest((prev) => mergeLatest(prev, rows));
-            appendHistory(rows);
-          }
-
-          if (msg.type === "reg-log") {
-            setRegLog((prev) => [msg.data, ...prev].slice(0, 30));
-          }
-        } catch (e) {
-          console.warn("[ws] could not parse message", e);
-        }
-      };
-
-      ws.onclose = () => {
-        if (cancelled) return;
-        setWsStatus("disconnected");
-        reconnectTimer = setTimeout(connect, 3000);
-      };
-
-      ws.onerror = () => {
-        ws.close();
-      };
+  const resolveAlert = async (id) => {
+    try {
+      await fetch(`${API_BASE}/api/alerts/${id}/resolve`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      pollSensors();
+      if (currentUser?.role === "admin") loadAuditLogs();
+    } catch (err) {
+      console.error("Failed to resolve alert:", err);
     }
+  };
 
-    connect();
-
-    return () => {
-      cancelled = true;
-      clearTimeout(reconnectTimer);
-      if (wsRef.current) {
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-      }
-    };
-  }, []);
-
-  const pollSensors = useCallback(() => {
-    Promise.all([
-      fetch(`${API_BASE}/api/sensors/latest`, { headers: AUTH_HEADERS }).then((r) => r.json()),
-      fetch(`${API_BASE}/api/sensors?limit=25`, { headers: AUTH_HEADERS }).then((r) => r.json()),
-      fetch(`${API_BASE}/api/sensors?limit=200`, { headers: AUTH_HEADERS }).then((r) => r.json()),
-      fetch(`${API_BASE}/api/debug/reg-log`, { headers: AUTH_HEADERS }).then((r) => r.json()),
-    ])
-      .then(([latestRows, feedRows, historyRows, regLogRows]) => {
-        setLatest(Array.isArray(latestRows) ? latestRows : []);
-        setFeed(Array.isArray(feedRows) ? feedRows : []);
-
-        const hist = Array.isArray(historyRows) ? [...historyRows].reverse() : [];
-        setTempHistory(hist.filter((r) => r.sensor_type === "temperature").slice(-HISTORY_CAP));
-        setHumHistory(hist.filter((r) => r.sensor_type === "humidity").slice(-HISTORY_CAP));
-
-        setRegLog(Array.isArray(regLogRows) ? regLogRows : []);
-        setConnErr(null);
-      })
-      .catch((e) => setConnErr(e.message));
-  }, []);
-
-  useInterval(pollSensors, 10000);
+  if (!authToken) {
+    return <Login apiBase={API_BASE} onLogin={handleLogin} />;
+  }
 
   const linkDown = connErr || wsStatus === "disconnected";
-
-  // Filter latest readings for the currently selected device's MAC address
   const activeMac = selectedDevice?.mac_address || "";
   const deviceReadings = latest.filter((s) => s.mac_address === activeMac);
-  
-  const getMetricVal = (type) => {
-    const r = deviceReadings.find((s) => s.sensor_type === type);
-    return r ? `${r.value} ${r.unit}` : "--";
-  };
+  const selectedDeviceStatus = selectedDevice ? deviceStatuses[selectedDevice.dongle_id] : null;
+  const selectedDeviceFeed = selectedDevice ? deviceFeeds[selectedDevice.dongle_id] : null;
 
   const selectedDeviceLastActive = deviceReadings.length
     ? new Date(Math.max(...deviceReadings.map((r) => new Date(r.received_at).getTime()))).toISOString()
     : null;
 
-  // Filter trends to selected device for visual charts
-  const selectedTempTrend = tempHistory.filter((r) => r.mac_address === activeMac);
-  const selectedHumTrend = humHistory.filter((r) => r.mac_address === activeMac);
+  const selectedTempTrend = chartTemperature.filter((r) => r.mac_address === activeMac);
+  const selectedHumTrend = chartHumidity.filter((r) => r.mac_address === activeMac);
 
   return (
     <div className="remonet-layout">
       {/* Sidebar Navigation */}
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <div className="brand-logo">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-            </svg>
-          </div>
-          <span className="brand-name">ReMoNet</span>
-        </div>
-
-        <nav className="sidebar-nav">
-          <button 
-            className={`nav-item ${viewMode === "dashboard" && !selectedDevice ? "active" : ""}`}
-            onClick={() => { setViewMode("dashboard"); setSelectedDevice(devices[0] || null); }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
-            Home
-          </button>
-
-          <div className="nav-group">
-            <button 
-              className="nav-item group-header"
-              onClick={() => setDevicesExpanded(!devicesExpanded)}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
-                <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
-                <line x1="7" y1="2" x2="7" y2="22" />
-                <line x1="17" y1="2" x2="17" y2="22" />
-                <line x1="2" y1="12" x2="22" y2="12" />
-              </svg>
-              Devices
-              <svg 
-                className={`chevron ${devicesExpanded ? "rotated" : ""}`} 
-                width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-              >
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
-            </button>
-
-            {devicesExpanded && (
-              <div className="nav-sub-list">
-                {devices.map((d) => {
-                  const isActive = viewMode === "dashboard" && selectedDevice?.mac_address === d.mac_address;
-                  return (
-                    <button
-                      key={d.mac_address}
-                      className={`nav-sub-item ${isActive ? "active" : ""}`}
-                      onClick={() => {
-                        setSelectedDevice(d);
-                        setViewMode("dashboard");
-                      }}
-                    >
-                      <span className="dot" />
-                      {d.dongle_id || d.product_type || "Energy Meter"}
-                    </button>
-                  );
-                })}
-                {devices.length === 0 && (
-                  <span className="nav-sub-empty">No registered devices</span>
-                )}
-              </div>
-            )}
-          </div>
-
-          <button 
-            className={`nav-item ${viewMode === "admin" ? "active" : ""}`}
-            onClick={() => setViewMode("admin")}
-            style={{ marginTop: "1rem" }}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
-              <line x1="12" y1="5" x2="12" y2="19" />
-              <line x1="5" y1="12" x2="19" y2="12" />
-            </svg>
-            + New / Modify
-          </button>
-
-          <button 
-            className={`nav-item ${viewMode === "admin" ? "active" : ""}`}
-            onClick={() => setViewMode("admin")}
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="nav-icon">
-              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-              <circle cx="12" cy="7" r="4" />
-            </svg>
-            Admin
-          </button>
-        </nav>
-      </aside>
+      <Sidebar
+        devices={devices}
+        selectedDevice={selectedDevice}
+        setSelectedDevice={setSelectedDevice}
+        viewMode={viewMode}
+        setViewMode={setViewMode}
+        devicesExpanded={devicesExpanded}
+        setDevicesExpanded={setDevicesExpanded}
+        currentUser={currentUser}
+        handleLogout={handleLogout}
+      />
 
       {/* Main Content Area */}
       <main className="main-content">
         {viewMode === "dashboard" ? (
           <>
-            {/* Dashboard Mode */}
-            <header className="main-header">
-              <div className="header-title-row">
-                <button className="back-btn" onClick={() => setSelectedDevice(null)}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                    <line x1="19" y1="12" x2="5" y2="12" />
-                    <polyline points="12 19 5 12 12 5" />
-                  </svg>
-                </button>
-                <h1 className="header-title">
-                  {selectedDevice ? (selectedDevice.dongle_id || selectedDevice.product_type).toUpperCase() : "DASHBOARD"}
-                </h1>
-              </div>
+            <DashboardHeader
+              selectedDevice={selectedDevice}
+              setSelectedDevice={setSelectedDevice}
+              alertSummary={alertSummary}
+              setIsAlertDrawerOpen={setIsAlertDrawerOpen}
+              linkDown={linkDown}
+            />
 
-              <div className="header-status">
-                <div className={`status-badge-indicator ${linkDown ? "offline" : "online"}`}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" className="status-icon">
-                    {linkDown ? (
-                      <path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.5M5 12.5a10.94 10.94 0 0 1 5.83-2.84M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01" />
-                    ) : (
-                      <path d="M5 12.5a10.87 10.87 0 0 1 14 0M8.53 16.11a6 6 0 0 1 6.95 0M12 20h.01" />
-                    )}
-                  </svg>
-                  {linkDown ? "Offline" : "Online"}
-                </div>
-              </div>
-            </header>
+            <FilterBar
+              quickRange={quickRange}
+              setQuickRange={(range) => {
+                setQuickRange(range);
+                const dates = rangeDates(range);
+                setStartDate(dates.start);
+                setEndDate(dates.end);
+              }}
+              startDate={startDate}
+              setStartDate={(date) => { setStartDate(date); setQuickRange("Custom range"); }}
+              endDate={endDate}
+              setEndDate={(date) => { setEndDate(date); setQuickRange("Custom range"); }}
+              onLoadData={() => {
+                loadChartHistory();
+                pollSensors();
+              }}
+              onSetInterval={() => {}}
+            />
 
-            {/* Filter Bar */}
-            <div className="filter-bar">
-              <div className="filter-group">
-                <label className="filter-label">Quick Range</label>
-                <select 
-                  className="filter-select" 
-                  value={quickRange}
-                  onChange={(e) => setQuickRange(e.target.value)}
-                >
-                  <option>Last 24 hrs</option>
-                  <option>Last 7 days</option>
-                  <option>Last 30 days</option>
-                </select>
-              </div>
-
-              <div className="filter-group">
-                <label className="filter-label">Start Date</label>
-                <div className="date-input-wrapper">
-                  <input 
-                    type="text" 
-                    className="filter-input" 
-                    value={startDate} 
-                    onChange={(e) => setStartDate(e.target.value)}
-                  />
-                  <svg className="calendar-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                    <line x1="16" y1="2" x2="16" y2="6" />
-                    <line x1="8" y1="2" x2="8" y2="6" />
-                    <line x1="3" y1="10" x2="21" y2="10" />
-                  </svg>
-                </div>
-              </div>
-
-              <div className="filter-group">
-                <label className="filter-label">End Date</label>
-                <div className="date-input-wrapper">
-                  <input 
-                    type="text" 
-                    className="filter-input" 
-                    value={endDate} 
-                    onChange={(e) => setEndDate(e.target.value)}
-                  />
-                  <svg className="calendar-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-                    <line x1="16" y1="2" x2="16" y2="6" />
-                    <line x1="8" y1="2" x2="8" y2="6" />
-                    <line x1="3" y1="10" x2="21" y2="10" />
-                  </svg>
-                </div>
-              </div>
-
-              <button className="btn-load-data">Load Data</button>
-              <button className="btn-set-interval">Set Interval</button>
-            </div>
-
-            {/* Content Dashboard Grid */}
             {selectedDevice ? (
               <div className="dashboard-grid-layout">
-                {/* Left Column: Device Info & Metrics */}
+                {/* Left Column: Device Info, Metrics, Heartbeat & Feed */}
                 <div className="column-left">
-                  {/* Device Info Panel */}
-                  <div className="dashboard-card">
-                    <h2 className="card-title">Device Information</h2>
-                    <div className="card-content-list">
-                      <div className="info-row">
-                        <span className="info-label">Serial Number</span>
-                        <span className="info-val">{selectedDevice.serial_number}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Product Type</span>
-                        <span className="info-val">{selectedDevice.product_type}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Last Updated</span>
-                        <span className="info-val">{selectedDeviceLastActive ? timeAgo(selectedDeviceLastActive) : "No heartbeat"}</span>
-                      </div>
-                    </div>
-                  </div>
+                  <DeviceInfoPanel
+                    selectedDevice={selectedDevice}
+                    selectedDeviceLastActive={selectedDeviceLastActive}
+                  />
 
-                  {/* Sensor Metrics Panel */}
-                  <div className="dashboard-card">
-                    <div className="metrics-header-row">
-                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="metrics-header-icon">
-                        <rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18" />
-                        <line x1="7" y1="2" x2="7" y2="22" />
-                        <line x1="17" y1="2" x2="17" y2="22" />
-                        <line x1="2" y1="12" x2="22" y2="12" />
-                      </svg>
-                      <h2 className="card-title">Energy Metrics</h2>
-                    </div>
+                  <EnergyMetricsPanel deviceReadings={deviceReadings} />
 
-                    <div className="card-content-list dotted-separators">
-                      <div className="info-row">
-                        <span className="info-label">Temperature</span>
-                        <span className="info-val">{getMetricVal("temperature")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Humidity</span>
-                        <span className="info-val">{getMetricVal("humidity")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Accelerometer X</span>
-                        <span className="info-val">{getMetricVal("accelerometer_x")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Accelerometer Y</span>
-                        <span className="info-val">{getMetricVal("accelerometer_y")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Accelerometer Z</span>
-                        <span className="info-val">{getMetricVal("accelerometer_z")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Gyroscope X</span>
-                        <span className="info-val">{getMetricVal("gyroscope_x")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Gyroscope Y</span>
-                        <span className="info-val">{getMetricVal("gyroscope_y")}</span>
-                      </div>
-                      <div className="info-row">
-                        <span className="info-label">Gyroscope Z</span>
-                        <span className="info-val">{getMetricVal("gyroscope_z")}</span>
-                      </div>
-                    </div>
-                  </div>
+                  <DeviceHeartbeatPanel selectedDeviceStatus={selectedDeviceStatus} />
+
+                  <LiveFeedPanel selectedDeviceFeed={selectedDeviceFeed} />
                 </div>
 
-                {/* Right Column: Sensor Trend Graph */}
+                {/* Right Column: Trend Graph */}
                 <div className="column-right">
                   <div className="dashboard-card chart-card">
-                    <TelemetryChart temperature={selectedTempTrend} humidity={selectedHumTrend} />
+                    <TelemetryChart
+                      temperature={selectedTempTrend}
+                      humidity={selectedHumTrend}
+                    />
                   </div>
                 </div>
               </div>
@@ -504,7 +399,9 @@ export default function App() {
 
             {/* Footer Bar */}
             <footer className="main-footer-nav">
-              <span className="footer-status">Showing Page 1 (Last {tempHistory.length + humHistory.length} points)</span>
+              <span className="footer-status">
+                Showing Page 1 (Last {tempHistory.length + humHistory.length} points)
+              </span>
               <div className="footer-pagination">
                 <button className="btn-pagination" disabled>Previous</button>
                 <button className="btn-pagination" disabled>Next</button>
@@ -512,145 +409,36 @@ export default function App() {
             </footer>
           </>
         ) : (
-          <>
-            {/* Administration / CSV Upload Mode */}
-            <header className="main-header">
-              <h1 className="header-title">ADMINISTRATIVE GATEWAY</h1>
-            </header>
-
-            <div className="admin-grid-layout">
-              {/* CSV Upload Profile Card */}
-              <div className="dashboard-card">
-                <h2 className="card-title">Sync Device Registry</h2>
-                <div className="upload-zone" onClick={() => fileInputRef.current?.click()}>
-                  <svg className="upload-icon" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
-                  </svg>
-                  <p className="upload-text">Click to choose a CSV device configuration profile or drag it here</p>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".csv,text/csv"
-                    className="file-input-hidden"
-                    onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
-                  />
-                  {csvFile && (
-                    <div className="selected-file-banner" onClick={(e) => e.stopPropagation()}>
-                      <span>{csvFile.name} ({(csvFile.size / 1024).toFixed(1)} KB)</span>
-                      <button className="file-remove-btn" onClick={() => setCsvFile(null)}>×</button>
-                    </div>
-                  )}
-                </div>
-
-                {csvFile && (
-                  <button type="button" onClick={uploadCsv} className="upload-action-btn" disabled={uploading}>
-                    {uploading ? "Applying..." : "Sync Devices List"}
-                  </button>
-                )}
-
-                {uploadErr && <p className="err-text">{uploadErr}</p>}
-                {uploadResult && (
-                  <p className="ok-text">
-                    Synced: {uploadResult.added.length} added, {uploadResult.removed.length} removed, {uploadResult.total_registered} total registered.
-                  </p>
-                )}
-              </div>
-
-              {/* Registered Devices List */}
-              <div className="dashboard-card">
-                <h2 className="card-title">Active Gateway Registry</h2>
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>MAC Address</th>
-                        <th>Serial Number</th>
-                        <th>Product Type</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {devices.map((d, i) => (
-                        <tr key={i}>
-                          <td>{d.mac_address}</td>
-                          <td>{d.serial_number}</td>
-                          <td>{d.product_type}</td>
-                        </tr>
-                      ))}
-                      {devices.length === 0 && (
-                        <tr>
-                          <td colSpan={3} className="empty-text">No registered devices. Upload registry profile above.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Handshake Attempts Log */}
-              <div className="dashboard-card">
-                <h2 className="card-title">Network Access Handshakes</h2>
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Timestamp</th>
-                        <th>MAC Address</th>
-                        <th>Result</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {regLog.map((r, i) => (
-                        <tr key={i}>
-                          <td>{new Date(r.time).toLocaleTimeString()}</td>
-                          <td>{r.mac}</td>
-                          <td className={r.result?.startsWith("ok") ? "ok-text" : "err-text"}>{r.result}</td>
-                        </tr>
-                      ))}
-                      {regLog.length === 0 && (
-                        <tr>
-                          <td colSpan={3} className="empty-text">No handshakes registered yet.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* Real-time Streams WebSocket Feed */}
-              <div className="dashboard-card">
-                <h2 className="card-title">Live Signal Streams</h2>
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Timestamp</th>
-                        <th>Sensor ID</th>
-                        <th>Metric</th>
-                        <th>Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {feed.map((r, i) => (
-                        <tr key={r.id ?? `${r.sensor_id}-${r.sensor_type}-${r.received_at}-${i}`}>
-                          <td>{new Date(r.received_at).toLocaleTimeString()}</td>
-                          <td>{r.sensor_id}</td>
-                          <td>{r.sensor_type}</td>
-                          <td>{r.value}{r.unit}</td>
-                        </tr>
-                      ))}
-                      {feed.length === 0 && (
-                        <tr>
-                          <td colSpan={4} className="empty-text">No incoming telemetry logs.</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </div>
-          </>
+          <AdminPanel
+            csvFile={csvFile}
+            setCsvFile={setCsvFile}
+            uploading={uploading}
+            uploadResult={uploadResult}
+            uploadErr={uploadErr}
+            uploadCsv={uploadCsv}
+            devices={devices}
+            regLog={regLog}
+            auditLogs={auditLogs}
+            auditSummary={auditSummary}
+            auditLoading={auditLoading}
+            auditFilterAction={auditFilterAction}
+            setAuditFilterAction={setAuditFilterAction}
+            loadAuditLogs={loadAuditLogs}
+          />
         )}
       </main>
+
+      {/* Slide-over Incident & Alerts Center Drawer */}
+      <AlertsDrawer
+        isOpen={isAlertDrawerOpen}
+        onClose={() => setIsAlertDrawerOpen(false)}
+        alertSummary={alertSummary}
+        alertFilter={alertFilter}
+        setAlertFilter={setAlertFilter}
+        alerts={alerts}
+        acknowledgeAlert={acknowledgeAlert}
+        resolveAlert={resolveAlert}
+      />
     </div>
   );
 }
