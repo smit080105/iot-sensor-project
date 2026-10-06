@@ -512,6 +512,17 @@ body {
   color: var(--color-navy);
 }
 
+.chart-history-status {
+  margin: 0.25rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
+
+.chart-history-status[role="alert"] {
+  color: #b91c1c;
+}
+
 .chart-select {
   background-color: #ffffff;
   border: 1px solid #cbd5e1;

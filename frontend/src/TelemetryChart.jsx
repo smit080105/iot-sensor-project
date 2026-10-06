@@ -77,7 +77,7 @@ const CustomTooltip = ({ active, payload, label }) => {
   return null;
 };
 
-export default function TelemetryChart({ temperature, humidity }) {
+export default function TelemetryChart({ temperature, humidity, loading = false, error = null }) {
   const [mode, setMode] = useState("correlation"); // default to correlation / common view
 
   const tempSeries = useMemo(
@@ -98,7 +98,16 @@ export default function TelemetryChart({ temperature, humidity }) {
   return (
     <div className="chart-block">
       <div className="chart-header">
-        <h3 className="chart-title">Sensor Trend</h3>
+        <div>
+          <h3 className="chart-title">Sensor Trend</h3>
+          <p className="chart-history-status" role={error ? "alert" : "status"}>
+            {loading
+              ? "Loading sensor history..."
+              : error
+                ? `History unavailable: ${error}`
+                : `${temperature.length + humidity.length} readings loaded (${temperature.length} temperature, ${humidity.length} humidity)`}
+          </p>
+        </div>
         <div className="chart-controls">
           <select 
             id="chart-mode" 
@@ -114,13 +123,21 @@ export default function TelemetryChart({ temperature, humidity }) {
       </div>
 
       <div className="chart-container-box">
-        {empty ? (
+        {loading ? (
+          <div className="chart-empty-state" role="status">
+            <p>Loading historical readings for this device and date range...</p>
+          </div>
+        ) : error ? (
+          <div className="chart-empty-state" role="alert">
+            <p>Could not load sensor history. Check that the backend is running and try again.</p>
+          </div>
+        ) : empty ? (
           <div className="chart-empty-state">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="empty-icon">
               <path d="M3 3v18h18" />
               <path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3" />
             </svg>
-            <p>No data points available for the selected range.</p>
+            <p>No temperature or humidity readings were saved for this device in the selected range.</p>
           </div>
         ) : (
           <div style={{ width: "100%", height: "100%" }}>

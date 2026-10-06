@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import TelemetryChart from "./TelemetryChart";
 import Login from "./Login";
 import Sidebar from "./components/Sidebar";
@@ -55,6 +55,9 @@ export default function App() {
   const [quickRange, setQuickRange] = useState("Last 24 hrs");
   const [chartTemperature, setChartTemperature] = useState([]);
   const [chartHumidity, setChartHumidity] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+  const historyRequestId = useRef(0);
 
   // Alerts & Incident drawer
   const [isAlertDrawerOpen, setIsAlertDrawerOpen] = useState(false);
@@ -214,23 +217,32 @@ export default function App() {
 
   const loadChartHistory = useCallback(async () => {
     if (!authToken || !selectedDevice?.mac_address) return;
+    const requestId = ++historyRequestId.current;
     if (!startDate || !endDate || startDate > endDate) {
-      setConnErr("Choose a valid date range (start date must not be after end date).");
+      setHistoryError("Choose a valid date range. The start date must not be after the end date.");
+      setHistoryLoading(false);
       return;
     }
+    setHistoryLoading(true);
+    setHistoryError(null);
     try {
       const query = new URLSearchParams({ start: startDate, end: endDate, mac_address: selectedDevice.mac_address, range: quickRange });
       const response = await fetch(`${API_BASE}/api/sensors/history?${query}`, { headers: getAuthHeaders() });
       const rows = await response.json();
       if (!response.ok) throw new Error(rows.error || `Could not load history (${response.status})`);
+      if (requestId !== historyRequestId.current) return;
       const sortedRows = Array.isArray(rows) ? rows : [];
       setChartTemperature(sortedRows.filter((r) => r.sensor_type === "temperature"));
       setChartHumidity(sortedRows.filter((r) => r.sensor_type === "humidity"));
-      setConnErr(null);
     } catch (error) {
-      setConnErr(error.message);
+      if (requestId !== historyRequestId.current) return;
+      setChartTemperature([]);
+      setChartHumidity([]);
+      setHistoryError(error.message || "Could not load sensor history.");
+    } finally {
+      if (requestId === historyRequestId.current) setHistoryLoading(false);
     }
-  }, [authToken, selectedDevice, startDate, endDate, quickRange, getAuthHeaders, setConnErr]);
+  }, [authToken, selectedDevice, startDate, endDate, quickRange, getAuthHeaders]);
 
   useEffect(() => {
     if (selectedDevice) loadChartHistory();
@@ -383,6 +395,8 @@ export default function App() {
                     <TelemetryChart
                       temperature={selectedTempTrend}
                       humidity={selectedHumTrend}
+                      loading={historyLoading}
+                      error={historyError}
                     />
                   </div>
                 </div>
