@@ -5,6 +5,49 @@ const { logAuditEvent, getClientIp } = require("../auditLogger");
 
 const router = express.Router();
 
+// Historical alert events for one device and an inclusive date or rolling range.
+router.get("/history", async (req, res) => {
+  const { dongle_id: dongleId, start, end } = req.query;
+  const isDate = (value) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+  };
+  if (!dongleId || !isDate(start) || !isDate(end) || start > end) {
+    return res.status(400).json({ error: "A device ID and valid start/end dates are required." });
+  }
+
+  const range = ["Last 24 hrs", "Last 7 days", "Last 30 days"].includes(req.query.range)
+    ? req.query.range
+    : "Custom range";
+  try {
+    const result = await pool.query(
+      `SELECT id, dongle_id, mac_address, alert_type, severity, message, reading_value, unit, status, created_at, resolved_at
+       FROM alerts
+       WHERE dongle_id = $1
+         AND created_at >= CASE $4
+           WHEN 'Last 24 hrs' THEN now() - INTERVAL '24 hours'
+           WHEN 'Last 7 days' THEN now() - INTERVAL '7 days'
+           WHEN 'Last 30 days' THEN now() - INTERVAL '30 days'
+           ELSE $2::date::timestamptz
+         END
+         AND created_at <= CASE $4
+           WHEN 'Last 24 hrs' THEN now()
+           WHEN 'Last 7 days' THEN now()
+           WHEN 'Last 30 days' THEN now()
+           ELSE ($3::date + INTERVAL '1 day')
+         END
+       ORDER BY created_at DESC
+       LIMIT 500`,
+      [dongleId, start, end, range]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("[alerts] Failed to fetch device alert history:", err.message);
+    res.status(500).json({ error: "Could not fetch device activity" });
+  }
+});
+
 /**
  * GET /api/alerts
  * Retrieve alert events with optional filtering by status or dongle_id

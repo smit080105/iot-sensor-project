@@ -7,6 +7,7 @@ import FilterBar from "./components/FilterBar";
 import DeviceInfoPanel from "./components/DeviceInfoPanel";
 import EnergyMetricsPanel from "./components/EnergyMetricsPanel";
 import DeviceHeartbeatPanel from "./components/DeviceHeartbeatPanel";
+import DeviceActivityTimeline from "./components/DeviceActivityTimeline";
 import LiveFeedPanel from "./components/LiveFeedPanel";
 import AdminPanel from "./components/AdminPanel";
 import AlertsDrawer from "./components/AlertsDrawer";
@@ -58,6 +59,10 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState(null);
   const historyRequestId = useRef(0);
+  const [activityAlerts, setActivityAlerts] = useState([]);
+  const [activityLoading, setActivityLoading] = useState(false);
+  const [activityError, setActivityError] = useState(null);
+  const activityRequestId = useRef(0);
 
   // Alerts & Incident drawer
   const [isAlertDrawerOpen, setIsAlertDrawerOpen] = useState(false);
@@ -248,6 +253,40 @@ export default function App() {
     if (selectedDevice) loadChartHistory();
   }, [selectedDevice, loadChartHistory]);
 
+  const loadDeviceActivity = useCallback(async () => {
+    if (!authToken || !selectedDevice?.dongle_id) return;
+    const requestId = ++activityRequestId.current;
+    if (!startDate || !endDate || startDate > endDate) {
+      setActivityError("Choose a valid date range.");
+      setActivityLoading(false);
+      return;
+    }
+    setActivityLoading(true);
+    setActivityError(null);
+    try {
+      const query = new URLSearchParams({
+        dongle_id: selectedDevice.dongle_id,
+        start: startDate,
+        end: endDate,
+        range: quickRange,
+      });
+      const response = await fetch(`${API_BASE}/api/alerts/history?${query}`, { headers: getAuthHeaders() });
+      const rows = await response.json();
+      if (!response.ok) throw new Error(rows.error || `Could not load alerts (${response.status})`);
+      if (requestId === activityRequestId.current) setActivityAlerts(Array.isArray(rows) ? rows : []);
+    } catch (error) {
+      if (requestId !== activityRequestId.current) return;
+      setActivityAlerts([]);
+      setActivityError(error.message || "Could not load alert history.");
+    } finally {
+      if (requestId === activityRequestId.current) setActivityLoading(false);
+    }
+  }, [authToken, selectedDevice, startDate, endDate, quickRange, getAuthHeaders]);
+
+  useEffect(() => {
+    if (selectedDevice) loadDeviceActivity();
+  }, [selectedDevice, loadDeviceActivity]);
+
   useInterval(pollSensors, 10000);
 
   async function uploadCsv(e) {
@@ -368,6 +407,7 @@ export default function App() {
               setEndDate={(date) => { setEndDate(date); setQuickRange("Custom range"); }}
               onLoadData={() => {
                 loadChartHistory();
+                loadDeviceActivity();
                 pollSensors();
               }}
               onSetInterval={() => {}}
@@ -399,6 +439,16 @@ export default function App() {
                       error={historyError}
                     />
                   </div>
+                  <DeviceActivityTimeline
+                    temperature={selectedTempTrend}
+                    humidity={selectedHumTrend}
+                    alerts={activityAlerts}
+                    range={quickRange}
+                    startDate={startDate}
+                    endDate={endDate}
+                    loading={activityLoading}
+                    error={activityError}
+                  />
                 </div>
               </div>
             ) : (

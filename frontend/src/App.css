@@ -436,6 +436,119 @@ body {
 .device-connection-state.recent { color: #92400e; background: #fef3c7; }
 .device-connection-state.offline { color: #991b1b; background: #fee2e2; }
 
+.device-activity-card {
+  min-width: 0;
+}
+
+.device-activity-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.device-activity-header .card-title {
+  margin-bottom: 0.25rem;
+}
+
+.device-activity-caption,
+.device-activity-footnote {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.device-activity-count {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 0.2rem 0.55rem;
+  color: #334155;
+  background: #f1f5f9;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.device-activity-list {
+  list-style: none;
+  margin: 1rem 0;
+  padding: 0 0 0 0.4rem;
+  max-height: 360px;
+  overflow-y: auto;
+}
+
+.device-activity-item {
+  position: relative;
+  display: flex;
+  gap: 0.75rem;
+  padding: 0 0 1rem;
+}
+
+.device-activity-item:not(:last-child)::before {
+  position: absolute;
+  content: "";
+  top: 0.65rem;
+  bottom: -0.1rem;
+  left: 0.3rem;
+  border-left: 1px solid #dbe3ed;
+}
+
+.device-activity-marker {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 0.65rem;
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.2rem;
+  border: 2px solid #0ea5e9;
+  border-radius: 50%;
+  background: #ffffff;
+}
+
+.device-activity-item.gap .device-activity-marker,
+.device-activity-item.alert .device-activity-marker {
+  border-color: #ef4444;
+}
+
+.device-activity-item.resume .device-activity-marker,
+.device-activity-item.resolved .device-activity-marker {
+  border-color: #16a34a;
+}
+
+.device-activity-content {
+  min-width: 0;
+}
+
+.device-activity-event-title {
+  color: var(--text-main);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.device-activity-detail,
+.device-activity-time {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.device-activity-empty,
+.device-activity-error {
+  margin: 1rem 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.device-activity-error {
+  color: #b91c1c;
+}
+
+.device-activity-footnote {
+  padding-top: 0.65rem;
+  border-top: 1px solid #e2e8f0;
+}
+
 /* Dotted separating lines for values */
 .card-content-list.dotted-separators .info-row {
   position: relative;
