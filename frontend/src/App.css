@@ -515,6 +515,16 @@ body {
   border-color: #16a34a;
 }
 
+.device-activity-item.offline .device-activity-marker {
+  border-color: #dc2626;
+  background: #dc2626;
+}
+
+.device-activity-item.status .device-activity-marker {
+  border-color: #2563eb;
+  background: #2563eb;
+}
+
 .device-activity-content {
   min-width: 0;
 }

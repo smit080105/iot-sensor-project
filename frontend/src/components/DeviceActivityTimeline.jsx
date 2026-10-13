@@ -33,6 +33,7 @@ export default function DeviceActivityTimeline({
   temperature,
   humidity,
   alerts,
+  statusEvents = [],
   range,
   startDate,
   endDate,
@@ -54,26 +55,34 @@ export default function DeviceActivityTimeline({
       if (times.length > 1) generated.push({ type: "reading", at: times[times.length - 1], title: "Most recent sensor reading" });
 
       const threshold = gapThreshold(range, startDate, endDate);
+      const explicitOfflineTimes = statusEvents
+        .filter((event) => event.event_type === "OFFLINE")
+        .map((event) => new Date(event.recorded_at).getTime())
+        .filter(Number.isFinite);
+      const explicitRecoveryTimes = statusEvents
+        .filter((event) => event.event_type === "RECOVERED")
+        .map((event) => new Date(event.recorded_at).getTime())
+        .filter(Number.isFinite);
       for (let index = 1; index < times.length; index += 1) {
         const gap = times[index] - times[index - 1];
         if (gap > threshold) {
-          generated.push({
+          const hasRecordedOffline = explicitOfflineTimes.some((at) => at >= times[index - 1] && at <= times[index]);
+          const hasRecordedRecovery = explicitRecoveryTimes.some((at) => at >= times[index - 1] && at <= times[index]);
+          if (!hasRecordedOffline) generated.push({
             type: "gap",
             at: times[index - 1] + threshold,
             title: `Telemetry gap: ${formatDuration(gap - threshold)}`,
             detail: "Inferred from a gap between recorded readings",
           });
-          generated.push({
-            type: "resume",
-            at: times[index],
-            title: "Sensor readings resumed",
-          });
+          if (!hasRecordedRecovery) generated.push({ type: "resume", at: times[index], title: "Sensor readings resumed" });
         }
       }
 
       const periodIncludesToday = range !== "Custom range" || endDate >= new Date().toISOString().slice(0, 10);
       const currentSilence = Date.now() - times[times.length - 1];
-      if (periodIncludesToday && currentSilence > threshold) {
+      const latestOffline = explicitOfflineTimes.filter((at) => at >= times[times.length - 1]).sort((a, b) => b - a)[0];
+      const recoveredAfterLatestOffline = latestOffline && explicitRecoveryTimes.some((at) => at > latestOffline);
+      if (periodIncludesToday && currentSilence > threshold && !latestOffline && !recoveredAfterLatestOffline) {
         generated.push({
           type: "gap",
           at: times[times.length - 1] + threshold,
@@ -100,18 +109,30 @@ export default function DeviceActivityTimeline({
       }
     }
 
+    for (const statusEvent of statusEvents) {
+      const at = new Date(statusEvent.recorded_at).getTime();
+      const state = statusEvent.state || "unknown";
+      const event = {
+        STATE_REPORTED: { type: "status", title: `Device state reported: ${state}`, detail: "State received from device heartbeat." },
+        STATE_CHANGED: { type: "status", title: `Device state changed: ${statusEvent.previous_state || "unknown"} → ${state}`, detail: "State transition received from device heartbeat." },
+        OFFLINE: { type: "offline", title: "Device marked offline after inactivity timeout", detail: "Recorded by the backend watchdog after the device stopped sending signals." },
+        RECOVERED: { type: "resume", title: "Device activity resumed", detail: "Recorded when a new device signal cleared the inactivity timeout." },
+      }[statusEvent.event_type];
+      if (event) generated.push({ ...event, at });
+    }
+
     return generated
       .filter((event) => Number.isFinite(event.at))
       .sort((a, b) => b.at - a.at)
       .slice(0, 30);
-  }, [temperature, humidity, alerts, range, startDate, endDate]);
+  }, [temperature, humidity, alerts, statusEvents, range, startDate, endDate]);
 
   return (
     <section className="dashboard-card device-activity-card" aria-labelledby="device-activity-title">
       <div className="device-activity-header">
         <div>
           <h2 className="card-title" id="device-activity-title">Device Activity</h2>
-          <p className="device-activity-caption">Recorded alerts and sensor activity for the selected period</p>
+          <p className="device-activity-caption">Recorded device states, watchdog events, alerts, and sensor activity</p>
         </div>
         <span className="device-activity-count">{events.length} events</span>
       </div>
@@ -119,9 +140,9 @@ export default function DeviceActivityTimeline({
       {loading ? (
         <p className="device-activity-empty" role="status">Loading device activity...</p>
       ) : error ? (
-        <p className="device-activity-error" role="alert">Could not load alert history: {error}</p>
+        <p className="device-activity-error" role="alert">Could not load complete device activity: {error}</p>
       ) : events.length === 0 ? (
-        <p className="device-activity-empty">No sensor readings or alerts were recorded for this period.</p>
+        <p className="device-activity-empty">No device events or sensor readings were recorded for this period.</p>
       ) : (
         <ol className="device-activity-list">
           {events.map((event, index) => (
@@ -138,7 +159,7 @@ export default function DeviceActivityTimeline({
           ))}
         </ol>
       )}
-      <p className="device-activity-footnote">Reading gaps are estimated from stored telemetry; they do not confirm a device outage.</p>
+      <p className="device-activity-footnote">Offline and recovery events are recorded by the backend watchdog. Other reading gaps are estimates and do not confirm an outage.</p>
     </section>
   );
 }

@@ -5,6 +5,7 @@ const pool = require("./db");
 const { getDeviceByMac, getMacByDongleId } = require("./deviceRegistry");
 const { broadcast } = require("./ws");
 const { evaluateReadingAlerts, resolveInactivityAlert } = require("./alertEngine");
+const { recordDeviceStatusEvent } = require("./statusHistory");
 
 // Default certificate paths (auto-resolving for local dev and Docker container)
 const DEFAULT_CERTS_DIR = path.resolve(__dirname, "../../certs");
@@ -16,8 +17,14 @@ const MQTT_CA_CERT_PATH = process.env.MQTT_CA_CERT_PATH || (fs.existsSync(DEFAUL
 const MQTT_CLIENT_CERT_PATH = process.env.MQTT_CLIENT_CERT_PATH || (fs.existsSync(DEFAULT_CERT) ? DEFAULT_CERT : null);
 const MQTT_CLIENT_KEY_PATH = process.env.MQTT_CLIENT_KEY_PATH || (fs.existsSync(DEFAULT_KEY) ? DEFAULT_KEY : null);
 
-// MQTT Broker URL. Defaults to TLS port 8883
-const MQTT_URL = process.env.MQTT_URL || "mqtts://broker.emqx.io:8883";
+// Broker choice and authentication are explicit so an unset URL can never
+// silently send production traffic to a shared public broker.
+const MQTT_URL = process.env.MQTT_URL;
+const MQTT_BROKER_MODE = (process.env.MQTT_BROKER_MODE || "private").toLowerCase();
+const MQTT_AUTH_MODE = (process.env.MQTT_AUTH_MODE || "mtls").toLowerCase();
+const MQTT_USERNAME = process.env.MQTT_USERNAME;
+const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
+const PUBLIC_TEST_BROKERS = new Set(["broker.emqx.io", "broker-cn.emqx.io"]);
 
 
 // Shared secret her device includes in remo_reg so we know the
@@ -150,6 +157,45 @@ function getRecentRegAttempts() {
 }
 
 function startMqttSubscriber() {
+  if (!MQTT_URL) {
+    throw new Error("MQTT_URL is required. Configure a private broker explicitly; public test brokers must be selected deliberately.");
+  }
+  let brokerUrl;
+  try {
+    brokerUrl = new URL(MQTT_URL);
+  } catch {
+    throw new Error("MQTT_URL must be a valid mqtts:// or mqtt:// URL.");
+  }
+  if (!["mqtts:", "mqtt:"].includes(brokerUrl.protocol)) {
+    throw new Error("MQTT_URL must use mqtts://; plaintext mqtt:// is not supported by this subscriber.");
+  }
+  if (brokerUrl.username || brokerUrl.password) {
+    throw new Error("Do not put broker credentials in MQTT_URL. Use MQTT_USERNAME and MQTT_PASSWORD.");
+  }
+  if (!["private", "public-test"].includes(MQTT_BROKER_MODE)) {
+    throw new Error("MQTT_BROKER_MODE must be 'private' or 'public-test'.");
+  }
+  if (process.env.NODE_ENV === "production" && MQTT_BROKER_MODE !== "private") {
+    throw new Error("Production requires MQTT_BROKER_MODE=private.");
+  }
+  if (PUBLIC_TEST_BROKERS.has(brokerUrl.hostname) && MQTT_BROKER_MODE !== "public-test") {
+    throw new Error("broker.emqx.io is a shared public test broker. Set MQTT_BROKER_MODE=public-test only for non-production use.");
+  }
+  if (MQTT_BROKER_MODE === "public-test" && process.env.NODE_ENV === "production") {
+    throw new Error("A public test broker cannot be used in production.");
+  }
+  if (!["mtls", "password", "none"].includes(MQTT_AUTH_MODE)) {
+    throw new Error("MQTT_AUTH_MODE must be 'mtls', 'password', or 'none'.");
+  }
+  if (MQTT_BROKER_MODE === "private" && MQTT_AUTH_MODE === "none") {
+    throw new Error("Private brokers require MQTT_AUTH_MODE=mtls or password.");
+  }
+  if (MQTT_AUTH_MODE === "none" && (MQTT_BROKER_MODE !== "public-test" || process.env.NODE_ENV === "production")) {
+    throw new Error("Unauthenticated MQTT is allowed only for an explicitly selected non-production public test broker.");
+  }
+  if (brokerUrl.protocol !== "mqtts:" && (process.env.NODE_ENV === "production" || process.env.MQTT_ALLOW_INSECURE !== "true")) {
+    throw new Error("MQTT requires TLS. For local-only development, set MQTT_ALLOW_INSECURE=true explicitly.");
+  }
   if (!PAIRING_TOKEN) {
     throw new Error(
       "PAIRING_TOKEN is not set — refusing to start the MQTT subscriber. " +
@@ -167,28 +213,33 @@ function startMqttSubscriber() {
   const mqttOptions = {
     clientId: "backend-service-" + Math.random().toString(16).slice(2, 8),
     clean: true,
+    ...(brokerUrl.protocol === "mqtts:" ? { rejectUnauthorized: true } : {}),
   };
 
-  const isPrivateBroker = MQTT_URL.includes("mosquitto") || MQTT_URL.includes("localhost") || MQTT_URL.includes("127.0.0.1");
-
-  // Configure Mutual TLS (mTLS) when connecting to private broker
-  if (isPrivateBroker && MQTT_CLIENT_CERT_PATH && MQTT_CLIENT_KEY_PATH) {
-    console.log("[mqtt] Enforcing Mutual TLS (mTLS) with client certificate:", MQTT_CLIENT_CERT_PATH);
+  if (MQTT_AUTH_MODE === "mtls") {
+    if (brokerUrl.protocol !== "mqtts:") throw new Error("MQTT_AUTH_MODE=mtls requires MQTT_URL=mqtts://...");
+    if (!MQTT_CA_CERT_PATH || !MQTT_CLIENT_CERT_PATH || !MQTT_CLIENT_KEY_PATH) {
+      throw new Error("mTLS requires MQTT_CA_CERT_PATH, MQTT_CLIENT_CERT_PATH, and MQTT_CLIENT_KEY_PATH.");
+    }
     try {
+      mqttOptions.ca = [fs.readFileSync(MQTT_CA_CERT_PATH)];
       mqttOptions.cert = fs.readFileSync(MQTT_CLIENT_CERT_PATH);
       mqttOptions.key = fs.readFileSync(MQTT_CLIENT_KEY_PATH);
-      if (MQTT_CA_CERT_PATH && fs.existsSync(MQTT_CA_CERT_PATH)) {
-        mqttOptions.ca = [fs.readFileSync(MQTT_CA_CERT_PATH)];
-      }
-      mqttOptions.rejectUnauthorized = true; // Fail closed on any verification error
+      console.log("[mqtt] Using mutual TLS client identity from:", MQTT_CLIENT_CERT_PATH);
     } catch (certErr) {
       console.error("[mqtt] Failed to read mTLS certificates:", certErr.message);
       throw certErr;
     }
+  } else if (MQTT_AUTH_MODE === "password") {
+    if (brokerUrl.protocol !== "mqtts:") throw new Error("MQTT_AUTH_MODE=password requires MQTT_URL=mqtts://...");
+    if (!MQTT_USERNAME || !MQTT_PASSWORD) {
+      throw new Error("MQTT_AUTH_MODE=password requires MQTT_USERNAME and MQTT_PASSWORD.");
+    }
+    mqttOptions.username = MQTT_USERNAME;
+    mqttOptions.password = MQTT_PASSWORD;
   } else {
-    console.log("[mqtt] Connecting with TLS to broker:", MQTT_URL);
+    console.warn("[mqtt] Connecting without broker authentication in public-test mode. Do not use sensitive data.");
   }
-
 
   const client = mqtt.connect(MQTT_URL, mqttOptions);
 
@@ -259,7 +310,7 @@ async function handleDeviceReg(client, payload, raw) {
     logRegAttempt({ topic: REG_TOPIC, raw, mac: null, token: token ?? null, result: "missing mac_address" });
     return;
   }
-  const isTokenValid = token && (token === PAIRING_TOKEN || token === "Shalaka_ReMoNet" || token === "Shalaka");
+  const isTokenValid = typeof token === "string" && token === PAIRING_TOKEN;
   if (!isTokenValid) {
     console.warn(`[mqtt] remo_reg REJECTED for ${mac} — invalid token: "${token}".`);
     logRegAttempt({ topic: REG_TOPIC, raw, mac, token: token ?? null, result: "invalid token" });
@@ -385,6 +436,10 @@ async function handleStatus(dongleId, payload) {
   const uptimeSec = payload.uptime_sec ?? payload.uptimeSec ?? payload.uptime ?? null;
 
   try {
+    const previousStatus = await pool.query(
+      "SELECT state FROM device_status WHERE dongle_id = $1",
+      [dongleId]
+    );
     const result = await pool.query(
       `INSERT INTO device_status (dongle_id, mac_address, state, uptime_sec, updated_at)
        VALUES ($1, $2, $3, $4, now())
@@ -393,6 +448,21 @@ async function handleStatus(dongleId, payload) {
        RETURNING dongle_id, mac_address, state, uptime_sec, updated_at`,
       [dongleId, mac, state, uptimeSec]
     );
+    const previousState = previousStatus.rows[0]?.state ?? null;
+    if (previousState === null || previousState !== String(state)) {
+      try {
+        await recordDeviceStatusEvent({
+          dongleId,
+          macAddress: mac,
+          eventType: previousState === null ? "STATE_REPORTED" : "STATE_CHANGED",
+          previousState,
+          state: String(state),
+          uptimeSec,
+        });
+      } catch (historyErr) {
+        console.error("[mqtt] Failed to store device status event:", historyErr.message);
+      }
+    }
     console.log(`[mqtt] Status update for ${dongleId}: state=${state}, uptime_sec=${uptimeSec}`);
     resolveInactivityAlert(dongleId).catch(() => {});
     broadcast({ type: "device-status", data: result.rows[0] });

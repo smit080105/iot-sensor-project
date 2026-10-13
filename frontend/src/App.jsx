@@ -60,6 +60,7 @@ export default function App() {
   const [historyError, setHistoryError] = useState(null);
   const historyRequestId = useRef(0);
   const [activityAlerts, setActivityAlerts] = useState([]);
+  const [activityStatusEvents, setActivityStatusEvents] = useState([]);
   const [activityLoading, setActivityLoading] = useState(false);
   const [activityError, setActivityError] = useState(null);
   const activityRequestId = useRef(0);
@@ -270,13 +271,22 @@ export default function App() {
         end: endDate,
         range: quickRange,
       });
-      const response = await fetch(`${API_BASE}/api/alerts/history?${query}`, { headers: getAuthHeaders() });
-      const rows = await response.json();
-      if (!response.ok) throw new Error(rows.error || `Could not load alerts (${response.status})`);
-      if (requestId === activityRequestId.current) setActivityAlerts(Array.isArray(rows) ? rows : []);
+      const headers = getAuthHeaders();
+      const [alertsResponse, statusResponse] = await Promise.all([
+        fetch(`${API_BASE}/api/alerts/history?${query}`, { headers }),
+        fetch(`${API_BASE}/api/status/${encodeURIComponent(selectedDevice.dongle_id)}/history?${query}`, { headers }),
+      ]);
+      const [alertsRows, statusRows] = await Promise.all([alertsResponse.json(), statusResponse.json()]);
+      if (!alertsResponse.ok) throw new Error(alertsRows.error || `Could not load alerts (${alertsResponse.status})`);
+      if (!statusResponse.ok) throw new Error(statusRows.error || `Could not load status history (${statusResponse.status})`);
+      if (requestId === activityRequestId.current) {
+        setActivityAlerts(Array.isArray(alertsRows) ? alertsRows : []);
+        setActivityStatusEvents(Array.isArray(statusRows) ? statusRows : []);
+      }
     } catch (error) {
       if (requestId !== activityRequestId.current) return;
       setActivityAlerts([]);
+      setActivityStatusEvents([]);
       setActivityError(error.message || "Could not load alert history.");
     } finally {
       if (requestId === activityRequestId.current) setActivityLoading(false);
@@ -443,6 +453,7 @@ export default function App() {
                     temperature={selectedTempTrend}
                     humidity={selectedHumTrend}
                     alerts={activityAlerts}
+                    statusEvents={activityStatusEvents}
                     range={quickRange}
                     startDate={startDate}
                     endDate={endDate}

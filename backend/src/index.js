@@ -8,6 +8,7 @@ const { initWebSocket } = require("./ws");
 const { initUsersTable } = require("./authUtil");
 const { initAlertsTable, startWatchdogMonitor } = require("./alertEngine");
 const { initAuditTable } = require("./auditLogger");
+const { initDeviceStatusEventsTable } = require("./statusHistory");
 
 const PORT = process.env.PORT || 4000;
 
@@ -30,6 +31,7 @@ async function main() {
   await initUsersTable();
   await initAlertsTable();
   await initAuditTable();
+  await initDeviceStatusEventsTable();
   startWatchdogMonitor();
 
   // Wrap the Express app in a plain HTTP server so the WebSocket server

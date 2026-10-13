@@ -1,5 +1,6 @@
 const pool = require("./db");
 const { broadcast } = require("./ws");
+const { recordDeviceStatusEvent } = require("./statusHistory");
 
 // Sensor threshold limits
 const THRESHOLDS = {
@@ -86,6 +87,20 @@ async function triggerAlert({ dongleId, mac, alertType, severity, message, value
     );
 
     const alert = res.rows[0];
+    if (alertType === "INACTIVITY_TIMEOUT") {
+      try {
+        await recordDeviceStatusEvent({
+          dongleId,
+          macAddress: mac,
+          eventType: "OFFLINE",
+          previousState: "online",
+          state: "offline",
+          recordedAt: alert.created_at,
+        });
+      } catch (historyErr) {
+        console.error("[alerts] Failed to store offline status event:", historyErr.message);
+      }
+    }
     console.warn(`[alerts] Triggered ${severity} alert on ${dongleId}: ${message}`);
 
     // Broadcast to connected web dashboards instantly
@@ -112,6 +127,20 @@ async function resolveAlert(dongleId, alertType) {
 
     if (res.rows.length > 0) {
       const resolvedAlert = res.rows[0];
+      if (alertType === "INACTIVITY_TIMEOUT") {
+        try {
+          await recordDeviceStatusEvent({
+            dongleId: resolvedAlert.dongle_id,
+            macAddress: resolvedAlert.mac_address,
+            eventType: "RECOVERED",
+            previousState: "offline",
+            state: "online",
+            recordedAt: resolvedAlert.resolved_at,
+          });
+        } catch (historyErr) {
+          console.error("[alerts] Failed to store recovery status event:", historyErr.message);
+        }
+      }
       console.log(`[alerts] Auto-resolved ${alertType} for ${dongleId}`);
       broadcast({ type: "alert-resolved", data: resolvedAlert });
       return resolvedAlert;
