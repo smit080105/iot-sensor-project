@@ -1,84 +1,164 @@
-# Security Notes
+# Enterprise IoT Security Architecture & Hardening Guide
 
-This document covers what was hardened in this project, what you as the
-operator still need to do, and the known limits of this setup so nobody
-mistakes it for more than it is.
+This document defines the zero-trust security controls, Private PKI infrastructure, Mutual TLS (mTLS) enforcement, topic-level access control lists (ACLs), and operational rotation procedures implemented for this IoT system.
 
-## What's enforced now
+---
 
-| Area | Before | Now |
-|---|---|---|
-| `/api/devices/upload` (CSV registry sync) | Open to anyone | Requires `x-api-key` header + rate limited (10 req / 15 min) |
-| All other `/api/*` routes (except `/api/health`) | Open to anyone | Requires `x-api-key` header |
-| WebSocket feed | Open to anyone | Requires `?apiKey=` query param on connect |
-| API rate limiting | None | 120 req/min general, 10 req/15min on upload |
-| CSV upload size/type | Unbounded, any file | Capped at 1MB, `.csv` only |
-| CORS | Wildcard (`*`) | Locked to `ALLOWED_ORIGIN` only |
-| HTTP security headers | None | `helmet` (CSP, HSTS, etc.) |
-| MQTT transport | Plaintext (`mqtt://…:1883`) | TLS by default (`mqtts://…:8883`) |
-| `PAIRING_TOKEN` | Hardcoded fallback (`"Shalaka"`) | Required, no fallback; warns if short |
-| Postgres port | Published to host (`5432:5432`) | Internal Docker network only |
-| `multer` (file upload lib) | v1.x (known CVEs) | v2.x, `npm audit`: 0 vulnerabilities |
-| Secrets in this project | Real credentials committed in `.env` | Rotated; `.env` stays out of git via `.gitignore` |
+## 1. Security Architecture Summary
 
-## What you must do before/after deploying
-
-1. **Treat every secret in this zip as already compromised** if it's been
-   shared with anyone else — `PAIRING_TOKEN`, `API_KEY`, and
-   `PGPASSWORD` were regenerated once already, but if you share this zip
-   or a git history containing `.env` again, rotate them again.
-2. **Set `ALLOWED_ORIGIN`** in `backend/.env` / `docker/.env` to your
-   actual frontend URL. Requests from any other origin are blocked.
-3. **Keep `API_KEY` identical** between `backend/.env` (`API_KEY`) and
-   `frontend/.env` / `docker/.env` (`VITE_API_KEY`) — they're compared
-   directly.
-4. **Update the device side** (her script) with the new `PAIRING_TOKEN`
-   — the old one no longer works and shouldn't be reused.
-5. **Never commit `.env` files.** Only `.env.example` files (placeholders)
-   should ever be shared or committed — this is already set up in
-   `.gitignore`, just don't override it.
-6. **Put TLS in front of the whole stack** before exposing this to the
-   real internet (e.g. terminate HTTPS at nginx or a reverse proxy with
-   a Let's Encrypt certificate). Right now nginx and the backend both
-   still serve plain HTTP — the API-key header is not meaningfully
-   secret if it travels over plaintext HTTP.
-
-## Known limits — read this before calling it "fully secure"
-
-- **The frontend's API key is not truly secret.** It's baked into the
-  built JS bundle (`VITE_API_KEY`), so anyone who can view the
-  dashboard's page source can read it. This stops random internet
-  traffic and casual scanning from reaching your API, but it does not
-  stop someone who already has access to the dashboard from also
-  calling the API directly. For a personal or small-team project this
-  is a reasonable trade-off; it is not enterprise-grade access control
-  (that would need per-user login + short-lived tokens).
-- **The MQTT broker is still shared and public.** TLS (`mqtts://`)
-  protects the wire between each client and the broker, but any other
-  client on `broker.emqx.io` can still subscribe to the same topic names
-  and see your traffic. `PAIRING_TOKEN` is the only thing stopping
-  impersonation, not topic secrecy. Long-term, move to a private broker
-  with per-device credentials and ACLs.
-- **One shared API key, not per-client credentials.** Fine for a single
-  admin/operator; if multiple people manage this system, consider
-  distinct credentials per person so access can be revoked individually.
-- **No centralized secret management.** Secrets live in `.env` files.
-  For anything beyond a small project, consider a secrets manager
-  (Vault, AWS Secrets Manager, etc.) instead.
-- **No audit logging beyond `docker logs`.** There's no persistent,
-  queryable record of who uploaded which CSV or when. Consider adding
-  structured logging (Winston/Pino) shipped to a log aggregator if this
-  matters for your use case.
-
-## Quick reference: generating secrets
-
-```bash
-# API_KEY / VITE_API_KEY (must match exactly)
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-
-# PAIRING_TOKEN
-node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
-
-# PGPASSWORD
-node -e "console.log(require('crypto').randomBytes(18).toString('base64url'))"
 ```
+                      [ Private PKI Root CA ]
+                                 │
+         ┌───────────────────────┴───────────────────────┐
+         ▼                                               ▼
+[ Broker TLS Cert (8883) ]                   [ Device Client Certs (CN=dongle_id) ]
+         │                                               │
+         │                                               │
+         └───────────── Mutual TLS (mTLS) Handshake ─────┘
+                       (TLS 1.2 / 1.3 Strict, Port 8883)
+                                 │
+                                 ▼
+                     [ Least-Privilege ACL ]
+               device_remo/%u/telemetry (Write Only)
+                                 │
+                                 ▼
+                    [ Backend Ingestion Worker ]
+                     (CN=backend-service cert)
+                                 │
+                                 ▼
+                 [ Express API + Rate Limiters ]
+```
+
+| Security Dimension | Implementation | Guarantee |
+|---|---|---|
+| **Transport Encryption** | TLS 1.2 minimum, TLS 1.3 preferred on Port 8883 | All network traffic encrypted; plaintext port 1883 completely disabled |
+| **Authentication** | Mutual TLS (mTLS) with X.509 Certificates | Server verifies device; device verifies server; fail-closed on verification errors |
+| **Device Identity** | On-Device Key Generation + Root CA Signed Cert | Private keys never leave the device; unique identity per device |
+| **Authorization** | Topic Access Control Lists (ACLs) - Deny by Default | Devices can only write to `device_remo/%u/telemetry`; no eavesdropping or cross-device publishing |
+| **API Defense** | Multi-Tier Rate Limiting (`express-rate-limit`) | 120 req/min general, 10 req/15min CSV uploads, 5 req/15min sensitive routes, 300 req/min health |
+| **Audit Logging** | Broker Audit Logging (`mosquitto-audit.log`) | Real-time audit trail of connections, handshakes, disconnects, and ACL violations |
+| **Secrets Protection** | `.gitignore` + Environment Variables | Private keys (`*.key`) and `.env` strictly excluded from source control |
+
+---
+
+## 2. Mutual TLS (mTLS) & Private PKI
+
+### Certificate Authority & Chain Hierarchy
+- **Root CA**: 4096-bit RSA self-signed Certificate Authority (`certs/ca.crt`), valid for 10 years.
+- **Server Certificate**: 2048-bit RSA with Subject Alternative Names (`DNS:localhost`, `DNS:mosquitto`, `DNS:backend`, `IP:127.0.0.1`), valid for 825 days.
+- **Backend Service Identity**: Client certificate (`certs/backend/backend-service.crt`) with Common Name `backend-service`.
+- **Device Certificates**: Unique client certificates (`certs/devices/<dongle_id>.crt`) where the certificate's Common Name (CN) binds to the device's unique ID (e.g. `DNG001`).
+
+### Safe On-Device Identity Generation
+To guarantee zero-trust:
+1. The device creates its own private key locally on edge hardware (`openssl genrsa -out device.key 2048`).
+2. The device generates a Certificate Signing Request (CSR) with its ID as the Common Name (`CN=<dongle_id>`).
+3. The CSR is submitted to the private CA for signing.
+4. The signed certificate (`device.crt`) is returned and installed.
+5. **The private key never leaves the edge device.**
+
+To generate or provision new certificates, run:
+```bash
+node scripts/generate-pki.js
+```
+This creates the development CA, broker, and backend identities. Device private
+keys are not generated on this host. Generate each device key and CSR on the
+device with `node scripts/create-device-csr.js <dongle_id>`, then sign only its
+CSR on the trusted CA host with
+`node scripts/sign-device-csr.js <dongle_id> <csr_path>`. See
+[`mqtt/SECURE_DEPLOYMENT.md`](mqtt/SECURE_DEPLOYMENT.md) for the complete flow.
+
+---
+
+## 3. Disabling Plaintext Listeners & Downgrade Attack Prevention
+
+- **Port 1883 is disabled**: The broker does not listen on unencrypted port 1883.
+- **Encrypted Port 8883**: All edge communication occurs over TLS-enabled port 8883.
+- **TLS Version Pinning**: Minimum TLS version is strictly set to `tlsv1.2`. Legacy protocols (SSLv2, SSLv3, TLS 1.0, TLS 1.1) are rejected to prevent downgrade attacks.
+- **Forward-Secrecy Cipher Suites**:
+  - `ECDHE-ECDSA-AES256-GCM-SHA384`
+  - `ECDHE-RSA-AES256-GCM-SHA384`
+  - `ECDHE-ECDSA-CHACHA20-POLY1305`
+  - `ECDHE-RSA-CHACHA20-POLY1305`
+  - `ECDHE-ECDSA-AES128-GCM-SHA256`
+  - `ECDHE-RSA-AES128-GCM-SHA256`
+
+---
+
+## 4. Least-Privilege Topic Access Control Lists (ACLs)
+
+Authentication does not imply full access. The broker enforces deny-by-default access control rules in `docker/mosquitto/acl.conf`:
+
+### Device Rules (Identity = `%u` matching Certificate CN)
+```ini
+# Write access strictly scoped to device's own telemetry:
+pattern write device_remo/%u/telemetry
+pattern write device_remo/%u/status
+pattern write device_remo/%u/feed
+pattern write device_remo/%u/register
+
+# Read access strictly scoped to device's own commands:
+pattern read device_remo/%u/commands
+pattern read device_remo/%u/ack
+pattern read device_remo/%u/register_ack
+```
+
+- **Deny Wildcards**: Devices cannot subscribe to `#` or `+`.
+- **Deny Cross-Device Access**: Device `DNG001` cannot read or write to `device_remo/DNG002/...`. Any attempt is silently dropped and logged.
+
+### Backend Ingestion Service Rules (Identity = `backend-service`)
+```ini
+user backend-service
+topic read device_remo/+/telemetry
+topic read device_remo/+/status
+topic read device_remo/+/feed
+topic read device_remo/+/register
+topic write device_remo/+/register_ack
+topic write device_remo/+/ack
+topic write device_remo/+/commands
+```
+
+---
+
+## 5. Network Segmentation & Firewall Recommendations
+
+1. **Broker in DMZ / Isolated VLAN**:
+   - The MQTT broker should reside on an isolated IoT VLAN or DMZ network segment.
+   - Restrict incoming firewall rules to **only port 8883** (MQTTS). The project dashboard does not need direct MQTT broker access.
+2. **Database Isolation**:
+   - The PostgreSQL database is on an internal Docker bridge network (`iot-net`) with no published host port.
+3. **Internal Backend Routing**:
+   - The backend container interacts with Mosquitto over the internal Docker network.
+
+---
+
+## 6. Certificate Rotation & Revocation Policy
+
+1. **Device Certificate Expiration**:
+   - Standard device certificates have a 365-day lifetime.
+   - Automated re-enrollment scripts should request a renewal 30 days prior to expiration.
+2. **Revoking Compromised Devices**:
+   - The bundled Mosquitto configuration does not currently load a CRL. For production, use a managed PKI or configure and deploy a CA-generated CRL before relying on certificate revocation. Until then, rotate the issuing CA and replace affected device certificates as part of incident response.
+3. **Secret Storage**:
+   - Private keys are ignored by Git via `.gitignore`.
+   - In production environments, store CA keys in Hardware Security Modules (HSM) or cloud secrets managers (AWS Secrets Manager, Google Secret Manager, HashiCorp Vault).
+
+---
+
+## 7. Verifying the Hardened System
+
+### 1. Re-generate PKI Certificates
+```bash
+node scripts/generate-pki.js
+```
+
+### 2. Verify Certificate Chains
+```bash
+"C:\Program Files\Git\usr\bin\openssl.exe" verify -CAfile certs/ca.crt certs/server.crt certs/backend/backend-service.crt certs/devices/DNG001.crt
+```
+
+### 3. Run the Edge Device Simulator
+```bash
+node scripts/device-sim.js
+```
+The simulator tests mTLS handshake, publishes authorized telemetry, and proves that unauthorized cross-device publish attempts are rejected by the broker.

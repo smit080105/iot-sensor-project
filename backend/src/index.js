@@ -42,7 +42,7 @@ async function main() {
   // No devices are registered at startup. The devices table only ever
   // reflects the last CSV uploaded through POST /api/devices/upload —
   // that CSV is the registry the MQTT handshake reads from.
-  startMqttSubscriber(); // remo_reg/remo_regOK handshake + telemetry/status/feed ingestion + ACKs + WS broadcast
+  startMqttSubscriber(); // Certificate-scoped registration + telemetry/status/feed ingestion + ACKs + WS broadcast
 
   server.listen(PORT, () =>
     console.log(`[http] backend + websocket listening on port ${PORT}`)

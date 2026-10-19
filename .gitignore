@@ -22,6 +22,8 @@ npm-debug.log*
 
 # PKI certificates & private keys (secrets must never be committed)
 *.key
+*.csr
+*.ext
 certs/**/*.key
 certs/*.key
 certs/*.srl

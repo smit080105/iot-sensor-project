@@ -27,20 +27,13 @@ const MQTT_PASSWORD = process.env.MQTT_PASSWORD;
 const PUBLIC_TEST_BROKERS = new Set(["broker.emqx.io", "broker-cn.emqx.io"]);
 
 
-// Shared secret her device includes in remo_reg so we know the
-// registration request is genuinely from her, not a stranger on the
-// public broker. Must match exactly what she publishes.
-//
-// There is no hardcoded fallback — a weak, well-known default defeats
-// the whole point of the check on a public broker where anyone can read
-// the topic. PAIRING_TOKEN must be set explicitly.
+// Application-level pairing secret used in addition to mTLS identity and certificate-scoped topic permissions.
 const PAIRING_TOKEN = process.env.PAIRING_TOKEN;
 
-// Fixed topic names — MQTT topics are case-sensitive strings, so these
-// must match her script's casing EXACTLY or messages vanish with no
-// error on either side.
-const REG_TOPIC = "remo_reg";
-const REGOK_TOPIC = "remo_regOK";
+// Registration is scoped to the certificate identity. The broker ACL binds
+// the topic's dongle ID to the mTLS certificate CN.
+const REG_TOPIC_FILTER = "device_remo/+/register";
+const REG_TOPIC_RE = /^device_remo\/([^/]+)\/register$/;
 
 // Everything else lives under device_remo/<dongle_id>/<...>. She
 // publishes telemetry, status heartbeats, and free-form feed updates;
@@ -140,10 +133,7 @@ function extractReadings(dataObj) {
   return readings;
 }
 
-// In-memory log of the last N remo_reg attempts, so you can SEE the
-// received mac_address/token from the dashboard instead of only in
-// `docker logs backend`. Exposed via GET /api/debug/reg-log AND pushed
-// live over WebSocket so the dashboard updates instantly.
+// Recent registration attempts are exposed through the dashboard. Registration secrets and raw payloads are redacted.
 const MAX_LOG = 30;
 const recentRegAttempts = [];
 function logRegAttempt(entry) {
@@ -202,13 +192,7 @@ function startMqttSubscriber() {
         "Set a long, random PAIRING_TOKEN in backend/.env (see .env.example)."
     );
   }
-  if (PAIRING_TOKEN.length < 16) {
-    console.warn(
-      "[mqtt] PAIRING_TOKEN is shorter than 16 characters — this token is sent in the clear " +
-        "on a public broker if MQTT_URL isn't using mqtts://, and is the only thing standing " +
-        "between a stranger and your device registrations. Use a long, random value."
-    );
-  }
+  if (PAIRING_TOKEN.length < 16) console.warn("[mqtt] PAIRING_TOKEN is shorter than 16 characters; use a long random value.");
 
   const mqttOptions = {
     clientId: "backend-service-" + Math.random().toString(16).slice(2, 8),
@@ -246,7 +230,7 @@ function startMqttSubscriber() {
 
   client.on("connect", () => {
     console.log(`[mqtt] connected to broker ${MQTT_URL}`);
-    for (const topic of [REG_TOPIC, TELEMETRY_TOPIC_FILTER, STATUS_TOPIC_FILTER, FEED_TOPIC_FILTER]) {
+    for (const topic of [REG_TOPIC_FILTER, TELEMETRY_TOPIC_FILTER, STATUS_TOPIC_FILTER, FEED_TOPIC_FILTER]) {
       client.subscribe(topic, (err) => {
         if (err) console.error(`[mqtt] subscribe error (${topic}):`, err.message);
         else console.log(`[mqtt] subscribed to ${topic}`);
@@ -260,15 +244,16 @@ function startMqttSubscriber() {
     try {
       payload = JSON.parse(raw);
     } catch {
-      console.warn(`[mqtt] Ignored non-JSON message on ${topic}: ${raw}`);
-      if (topic === REG_TOPIC) {
-        logRegAttempt({ topic, raw, mac: null, token: null, result: "invalid JSON" });
+      console.warn(`[mqtt] Ignored non-JSON message on ${topic}; payload omitted from logs.`);
+      if (REG_TOPIC_RE.test(topic)) {
+        logRegAttempt({ topic, raw: "[invalid JSON payload redacted]", mac: null, result: "invalid JSON" });
       }
       return;
     }
 
-    if (topic === REG_TOPIC) {
-      return handleDeviceReg(client, payload, raw);
+    const registrationMatch = topic.match(REG_TOPIC_RE);
+    if (registrationMatch) {
+      return handleDeviceReg(client, registrationMatch[1], payload);
     }
 
     const telemetryMatch = topic.match(TELEMETRY_TOPIC_RE);
@@ -294,26 +279,22 @@ function startMqttSubscriber() {
   return client;
 }
 
-// Step 1 of the handshake: she publishes remo_reg with her MAC + token.
-// The CSV you've already uploaded is the source of truth — we look the
-// MAC up in the `devices` table and, if it's there, echo that exact row
-// back on remo_regOK.
-async function handleDeviceReg(client, payload, raw) {
-  const rawMac = payload.mac_address ?? payload.mac ?? payload.macAddress ?? payload.MAC ?? "";
+// Registration requests arrive on device_remo/<dongle_id>/register. The mTLS certificate identity and registered MAC must match.
+async function handleDeviceReg(client, topicDongleId, payload) {
+  const rawMac = payload.mac_address ?? payload.mac ?? payload.macAddress ?? payload.MAC ?? '';
   const mac = String(rawMac).toUpperCase();
   const token = payload.token;
+  const registrationTopic = `device_remo/${topicDongleId}/register`;
+  const safeRaw = JSON.stringify({ ...payload, token: token ? '[REDACTED]' : undefined });
 
-  console.log(`[mqtt] remo_reg received — raw payload: ${raw}`);
-
+  console.log(`[mqtt] Registration received on ${registrationTopic}: ${safeRaw}`);
   if (!mac) {
-    console.warn("[mqtt] remo_reg message missing a MAC address field (expected mac_address) — ignored.");
-    logRegAttempt({ topic: REG_TOPIC, raw, mac: null, token: token ?? null, result: "missing mac_address" });
+    logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac: null, result: 'missing mac_address' });
     return;
   }
-  const isTokenValid = typeof token === "string" && token === PAIRING_TOKEN;
-  if (!isTokenValid) {
-    console.warn(`[mqtt] remo_reg REJECTED for ${mac} — invalid token: "${token}".`);
-    logRegAttempt({ topic: REG_TOPIC, raw, mac, token: token ?? null, result: "invalid token" });
+  if (typeof token !== 'string' || token !== PAIRING_TOKEN) {
+    console.warn(`[mqtt] Registration rejected for ${mac}: invalid pairing token.`);
+    logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac, result: 'invalid token' });
     return;
   }
 
@@ -322,19 +303,21 @@ async function handleDeviceReg(client, payload, raw) {
     device = await getDeviceByMac(mac);
   } catch (err) {
     console.error(`[mqtt] DB lookup failed for ${mac}:`, err.message);
-    logRegAttempt({ topic: REG_TOPIC, raw, mac, token, result: "db error" });
+    logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac, result: 'db error' });
     return;
   }
-
   if (!device) {
-    console.warn(
-      `[mqtt] remo_reg token OK for ${mac}, but it's not in the uploaded CSV yet — ` +
-        `add a row for it (mac_address, serial_number, product_type, dongle_id) and upload the CSV first.`
-    );
-    logRegAttempt({ topic: REG_TOPIC, raw, mac, token, result: "not in CSV registry" });
+    console.warn(`[mqtt] Registration rejected for ${mac}: device is not in the uploaded registry.`);
+    logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac, result: 'not in CSV registry' });
+    return;
+  }
+  if (device.dongle_id !== topicDongleId) {
+    console.warn(`[mqtt] Registration rejected for ${mac}: certificate identity ${topicDongleId} does not match registered device ${device.dongle_id}.`);
+    logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac, result: 'certificate identity does not match registered device' });
     return;
   }
 
+  const replyTopic = `device_remo/${topicDongleId}/register_ack`;
   const regOkPayload = {
     mac: device.mac_address,
     mac_address: device.mac_address,
@@ -342,14 +325,12 @@ async function handleDeviceReg(client, payload, raw) {
     dongle_id: device.dongle_id,
     product_type: device.product_type,
   };
-  client.publish(REGOK_TOPIC, JSON.stringify(regOkPayload), { qos: 1 }, (err) => {
-    if (err) console.error(`[mqtt] Error publishing ${REGOK_TOPIC}:`, err.message);
-    else console.log(`[mqtt] Successfully published ${REGOK_TOPIC} (QoS 1) for ${mac}`);
+  client.publish(replyTopic, JSON.stringify(regOkPayload), { qos: 1 }, (err) => {
+    if (err) console.error(`[mqtt] Error publishing ${replyTopic}:`, err.message);
+    else console.log(`[mqtt] Successfully published ${replyTopic} (QoS 1) for ${mac}`);
   });
-  console.log(`[mqtt] Published ${REGOK_TOPIC} for ${mac}:`, regOkPayload);
-  logRegAttempt({ topic: REG_TOPIC, raw, mac, token, result: "ok — remo_regOK sent", regOkPayload });
+  logRegAttempt({ topic: registrationTopic, raw: safeRaw, mac, result: 'ok: registration acknowledgement sent', regOkPayload });
 }
-
 // Step 2: telemetry arrives on device_remo/<dongle_id>/telemetry as
 // {mid, dongle_id, type, data: {...sensor fields...}}. We trust the
 // dongle_id in the TOPIC (not the payload) to decide which device this

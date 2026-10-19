@@ -3,8 +3,8 @@
 // handshake just reads/echoes rows from here, it never invents data.
 const pool = require("./db");
 
-// Used by remo_reg: look up a device by MAC so we can echo its real
-// serial_number/dongle_id/product_type back on remo_regOK.
+// Used by the certificate-scoped registration handshake to look up a device
+// by MAC and verify its registered dongle ID against the MQTT topic identity.
 async function getDeviceByMac(mac) {
   const result = await pool.query(
     "SELECT mac_address, serial_number, product_type, dongle_id FROM devices WHERE mac_address = $1",

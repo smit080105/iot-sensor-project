@@ -4,9 +4,9 @@
 #
 # NOTE: devices are registered by uploading devices.csv (the CSV IS the
 # registry). The MQTT handshake with the second party (her device/script)
-# on remo_reg/remo_regOK just looks a MAC up in that CSV-backed table
-# and echoes it back — see backend/src/mqtt.js and mqtt/PUBLIC_BROKER.md
-# for the full flow.
+# on device_remo/<dongle_id>/register looks the MAC up in that CSV-backed
+# table and replies in the same device namespace. See backend/src/mqtt.js
+# and mqtt/SECURE_DEPLOYMENT.md for the enrollment flow.
 
 services:
   postgres:
@@ -54,8 +54,8 @@ services:
       MQTT_CLIENT_CERT_PATH: /app/certs/backend/backend-service.crt
       MQTT_CLIENT_KEY_PATH: /app/certs/backend/backend-service.key
 
-      # Shared secret her device includes in remo_reg. Must match
-      # exactly what she publishes, or registration requests get rejected.
+      # Additional application-level pairing secret used after the broker
+      # authenticates the device certificate and scopes its topic identity.
       PAIRING_TOKEN: ${PAIRING_TOKEN}
 
       # Required on every /api/* request (header: x-api-key) except
@@ -69,7 +69,9 @@ services:
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:-}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
     volumes:
-      - ../certs:/app/certs:ro
+      - ../certs/ca.crt:/app/certs/ca.crt:ro
+      - ../certs/backend/backend-service.crt:/app/certs/backend/backend-service.crt:ro
+      - ../certs/backend/backend-service.key:/app/certs/backend/backend-service.key:ro
     ports:
       - "4000:4000"
     depends_on:
@@ -89,11 +91,12 @@ services:
       # Ports 8883-8886 on Windows host are reserved by Windows Hyper-V/NAT port exclusion,
       # so host port 8888 forwards to container port 8883 (MQTTS).
       - "${MOSQUITTO_HOST_PORT:-8888}:8883"
-      - "9001:9001"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/acl.conf:/mosquitto/config/acl.conf:ro
-      - ../certs:/mosquitto/certs:ro
+      - ../certs/ca.crt:/mosquitto/certs/ca.crt:ro
+      - ../certs/server.crt:/mosquitto/certs/server.crt:ro
+      - ../certs/server.key:/mosquitto/certs/server.key:ro
       - mosquitto-log:/mosquitto/log
     networks:
       - iot-net
