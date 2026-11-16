@@ -46,6 +46,7 @@ export default function App() {
   const [devices, setDevices] = useState([]);
   const [devicesErr, setDevicesErr] = useState(null);
   const [selectedDevice, setSelectedDevice] = useState(null);
+  const hasInitializedDeviceSelection = useRef(false);
   const [devicesExpanded, setDevicesExpanded] = useState(true);
   const [viewMode, setViewMode] = useState("dashboard"); // 'dashboard' | 'admin'
 
@@ -150,12 +151,13 @@ export default function App() {
     loadDevices();
   }, [loadDevices]);
 
-  // Set default selected device on load
+  // Select a default device once, without overriding later navigation to Home.
   useEffect(() => {
-    if (devices.length > 0 && !selectedDevice) {
+    if (devices.length > 0 && !hasInitializedDeviceSelection.current) {
       setSelectedDevice(devices[0]);
+      hasInitializedDeviceSelection.current = true;
     }
-  }, [devices, selectedDevice]);
+  }, [devices]);
 
   const loadAuditLogs = useCallback(() => {
     if (!authToken || currentUser?.role !== "admin") return;

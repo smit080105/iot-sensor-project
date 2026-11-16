@@ -10,12 +10,20 @@ export default function DashboardHeader({
   return (
     <header className="main-header">
       <div className="header-title-row">
-        <button className="back-btn" onClick={() => setSelectedDevice(null)} title="Back to Overview">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="19" y1="12" x2="5" y2="12" />
-            <polyline points="12 19 5 12 12 5" />
-          </svg>
-        </button>
+        {selectedDevice && (
+          <button
+            type="button"
+            className="back-btn"
+            onClick={() => setSelectedDevice(null)}
+            title="Back to Overview"
+            aria-label="Back to Overview"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="19" y1="12" x2="5" y2="12" />
+              <polyline points="12 19 5 12 12 5" />
+            </svg>
+          </button>
+        )}
         <h1 className="header-title">
           {selectedDevice
             ? (selectedDevice.dongle_id || selectedDevice.product_type).toUpperCase()
@@ -26,6 +34,7 @@ export default function DashboardHeader({
       <div className="header-status">
         {/* Alert Notification Bell Button */}
         <button
+          type="button"
           className={`btn-alert-bell ${
             alertSummary.critical > 0
               ? "critical-alarm"
